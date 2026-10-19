@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Origens liberadas apenas em desenvolvimento (front local). Em produção a lista é sempre explícita.
+DEV_CORS_ORIGINS = (
+    "http://localhost,http://localhost:3000,http://localhost:5173,http://localhost:5500,http://localhost:8081,"
+    "http://127.0.0.1,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:5500,http://127.0.0.1:8081"
+)
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "0.0.0.0"}
 
 
 class Settings(BaseSettings):
@@ -24,10 +33,15 @@ class Settings(BaseSettings):
     java_api_url: str = "http://localhost:8080"
     internal_api_key: SecretStr = SecretStr("")
     request_timeout_seconds: float = 12.0
-    cors_allowed_origins: str = (
-        "http://localhost,http://localhost:3000,http://localhost:5173,http://localhost:5500,http://localhost:8081,"
-        "http://127.0.0.1,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:5500,http://127.0.0.1:8081"
-    )
+    app_env: Literal["development", "production"] = "development"
+    # Vazio em desenvolvimento = origens locais; em produção é obrigatório informar (sem wildcard).
+    cors_allowed_origins: str = ""
+    # A autenticação usa o header Authorization (Bearer), não cookies: credenciais ficam desligadas.
+    cors_allow_credentials: bool = False
+    # Cache curto do perfil (/auth/me) por token. 0 desativa.
+    profile_cache_ttl_seconds: float = 45.0
+    # Limite de pontos da série bruta em /climate/history; acima disso exige resolution=hour|day.
+    history_max_raw_points: int = 5000
     root_path: str = ""
 
     @field_validator("java_api_url")
@@ -45,9 +59,43 @@ class Settings(BaseSettings):
             raise ValueError("REQUEST_TIMEOUT_SECONDS deve estar entre 1 e 60 segundos.")
         return value
 
+    @field_validator("profile_cache_ttl_seconds")
+    @classmethod
+    def validate_cache_ttl(cls, value: float) -> float:
+        if value < 0 or value > 300:
+            raise ValueError("PROFILE_CACHE_TTL_SECONDS deve estar entre 0 e 300 segundos.")
+        return value
+
+    @field_validator("history_max_raw_points")
+    @classmethod
+    def validate_max_raw_points(cls, value: int) -> int:
+        if value < 100:
+            raise ValueError("HISTORY_MAX_RAW_POINTS deve ser pelo menos 100.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_cors(self) -> "Settings":
+        origins = self._parse_origins(self.cors_allowed_origins)
+        if "*" in origins:
+            raise ValueError("CORS_ALLOWED_ORIGINS não aceita wildcard (*); liste as origens explicitamente.")
+        if self.app_env == "production":
+            if not origins:
+                raise ValueError("Em produção, defina CORS_ALLOWED_ORIGINS com as origens do front-end.")
+            local = [origin for origin in origins if urlparse(origin).hostname in _LOCAL_HOSTS]
+            if local:
+                raise ValueError(f"Origens locais não são permitidas em produção: {', '.join(local)}.")
+        return self
+
+    @staticmethod
+    def _parse_origins(raw: str) -> list[str]:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
     @property
     def configured_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+        explicit = self._parse_origins(self.cors_allowed_origins)
+        if explicit:
+            return explicit
+        return self._parse_origins(DEV_CORS_ORIGINS) if self.app_env == "development" else []
 
     @property
     def internal_key_configured(self) -> bool:

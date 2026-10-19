@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -10,14 +10,40 @@ from app.clients.java_api import JavaApiClient
 from app.config import Settings
 from app.errors import ServiceError
 from app.models import (
+    AnalystDashboard,
     ClimateSummary,
+    ComparisonSummary,
     DashboardSummary,
     PlantationByVariety,
     PlantationSummary,
+    QualitySummary,
     SourceAvailability,
     SyncSummary,
 )
 from app.services.analysis import summarize_climate, summarize_quality
+
+HistoryResolution = Literal["auto", "raw", "hour", "day"]
+EXPECTED_METRICS = {"temperature", "humidity"}
+
+
+def resolve_window(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
+    """Sem datas = últimas 24 h; informar só uma das duas é erro."""
+    if start is None and end is None:
+        end = datetime.now(UTC)
+        return end - timedelta(hours=24), end
+    if start is None or end is None:
+        raise ServiceError(400, "Informe as duas datas: start e end.")
+    return start, end
+
+
+def pick_resolution(start: datetime, end: datetime) -> Literal["raw", "hour", "day"]:
+    """Escolha automática: até 48 h bruto, até 31 dias por hora, acima disso por dia."""
+    span = end - start
+    if span <= timedelta(hours=48):
+        return "raw"
+    if span <= timedelta(days=31):
+        return "hour"
+    return "day"
 
 
 class DashboardService:
@@ -44,13 +70,33 @@ class DashboardService:
     async def integration_status(self, authorization: str) -> dict[str, Any]:
         return await self.java.thingspeak_status(authorization)
 
-    async def climate_summary(self, start: datetime, end: datetime) -> tuple[ClimateSummary, list[dict[str, Any]]]:
+    async def climate_summary(self, start: datetime, end: datetime,
+                              resolution: Literal["raw", "hour", "day"] = "raw",
+                              ) -> tuple[ClimateSummary, list[dict[str, Any]]]:
         self._validate_range(start, end)
         readings = await self.java.climate_readings(start, end)
+        return self._summarize(readings, resolution), readings
+
+    async def climate_history(self, start: datetime, end: datetime,
+                              resolution: HistoryResolution = "auto") -> ClimateSummary:
+        """Histórico com a série agregada por hora/dia para não devolver até 366 dias de leituras brutas."""
+        self._validate_range(start, end)
+        chosen = pick_resolution(start, end) if resolution == "auto" else resolution
+        readings = await self.java.climate_readings(start, end)
+        limit = self.settings.history_max_raw_points
+        if chosen == "raw" and len(readings) > limit:
+            raise ServiceError(
+                400,
+                f"O período tem {len(readings)} leituras (limite bruto: {limit}). "
+                "Use resolution=hour ou resolution=day, ou reduza o intervalo.",
+            )
+        return self._summarize(readings, chosen)
+
+    @staticmethod
+    def _summarize(readings: list[dict[str, Any]], resolution: Literal["raw", "hour", "day"]) -> ClimateSummary:
         channel_ids = {str(reading.get("channelId")) for reading in readings if reading.get("channelId")}
         channel_id = channel_ids.pop() if len(channel_ids) == 1 else None
-        summary = summarize_climate(readings, channel_id=channel_id, source="ThingSpeak")
-        return summary, readings
+        return summarize_climate(readings, channel_id=channel_id, source="ThingSpeak", resolution=resolution)
 
     async def plantation_summary(self, authorization: str) -> tuple[PlantationSummary, list[dict[str, Any]]]:
         plantations = await self.java.plantations(authorization)
@@ -82,9 +128,54 @@ class DashboardService:
 
     async def dashboard_summary(self, authorization: str) -> DashboardSummary:
         now = datetime.now(UTC)
-        climate_task = self.climate_summary(now - timedelta(hours=24), now)
-        plantations_task = self.plantation_summary(authorization)
-        (climate, _), (plantations, _) = await _gather(climate_task, plantations_task)
+        (climate, _), (plantations, _) = await asyncio.gather(
+            self.climate_summary(now - timedelta(hours=24), now),
+            self.plantation_summary(authorization),
+        )
+        return self._build_dashboard(climate, plantations)
+
+    async def analyst_dashboard(self, authorization: str, start: datetime | None,
+                                end: datetime | None) -> AnalystDashboard:
+        """Painel do analista. Cada fonte é consultada no Java uma única vez.
+
+        Sem datas, a janela de qualidade é a mesma das últimas 24 h do resumo: as leituras
+        buscadas uma vez servem aos dois. Com datas personalizadas são duas janelas distintas,
+        buscadas em paralelo.
+        """
+        default_window = start is None and end is None
+        start, end = resolve_window(start, end)
+        now = datetime.now(UTC)
+        day_start = now - timedelta(hours=24)
+
+        if default_window:
+            (climate, readings), (plantations, _) = await asyncio.gather(
+                self.climate_summary(day_start, now),
+                self.plantation_summary(authorization),
+            )
+        else:
+            (climate, _), (_, readings), (plantations, _) = await asyncio.gather(
+                self.climate_summary(day_start, now),
+                self.climate_summary(start, end),
+                self.plantation_summary(authorization),
+            )
+
+        summary = self._build_dashboard(climate, plantations)
+        quality = QualitySummary.model_validate(summarize_quality(readings, expected_metrics=EXPECTED_METRICS))
+        comparison = ComparisonSummary(
+            available=climate.available or plantations.total_plantations > 0,
+            climate_metrics=climate.metrics,
+            plantations_by_variety=plantations.by_variety,
+            limitation="As leituras climáticas são agregadas por canal. Não há vínculo entre sensor e variedade no cadastro atual.",
+        )
+        return AnalystDashboard(summary=summary, quality=quality, comparison=comparison,
+                                generated_at=datetime.now(UTC))
+
+    async def quality_summary(self, start: datetime, end: datetime) -> dict[str, Any]:
+        _, readings = await self.climate_summary(start, end)
+        return summarize_quality(readings, expected_metrics=EXPECTED_METRICS)
+
+    @staticmethod
+    def _build_dashboard(climate: ClimateSummary, plantations: PlantationSummary) -> DashboardSummary:
         sources = [
             SourceAvailability(source="ThingSpeak", available=climate.available, configured=climate.available,
                                message=climate.message or "Leituras de temperatura e umidade recebidas pela API Java."),
@@ -92,10 +183,6 @@ class DashboardService:
                                message="Autenticação, plantações e persistência servidas pela API Java."),
         ]
         return DashboardSummary(climate=climate, plantations=plantations, sources=sources)
-
-    async def quality_summary(self, start: datetime, end: datetime) -> dict[str, Any]:
-        _, readings = await self.climate_summary(start, end)
-        return summarize_quality(readings, expected_metrics={"temperature", "humidity"})
 
     @staticmethod
     def _validate_range(start: datetime, end: datetime) -> None:
@@ -113,10 +200,3 @@ class DashboardService:
         except (TypeError, ValueError, OverflowError):
             return 0
 
-
-async def _gather(first, second):
-    results = await asyncio.gather(first, second, return_exceptions=True)
-    for result in results:
-        if isinstance(result, Exception):
-            raise result
-    return results[0], results[1]

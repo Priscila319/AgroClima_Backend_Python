@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -40,8 +40,47 @@ def _metric_key(value: str) -> str:
     return value.lower().replace("_", "")
 
 
+def _bucket_start(stamp: datetime, resolution: str) -> datetime:
+    if resolution == "hour":
+        return stamp.replace(minute=0, second=0, microsecond=0)
+    return stamp.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def aggregate_series(normalized: list[tuple[datetime, dict[str, float | None], str]],
+                     resolution: Literal["hour", "day"]) -> list[ClimatePoint]:
+    """Reduz a série a um ponto por hora/dia (UTC), com a média de cada métrica no intervalo.
+
+    `normalized` deve vir ordenada por data. O timestamp do ponto é o início do intervalo.
+    """
+    buckets: dict[datetime, list[tuple[dict[str, float | None], str]]] = {}
+    for stamp, values, quality in normalized:
+        buckets.setdefault(_bucket_start(stamp, resolution), []).append((values, quality))
+
+    points: list[ClimatePoint] = []
+    for start, items in buckets.items():
+        sums: dict[str, list[float]] = {}
+        for values, _ in items:
+            for name, number in values.items():
+                if number is not None:
+                    sums.setdefault(name, []).append(number)
+        qualities = {quality for _, quality in items}
+        if qualities == {"VALID"}:
+            quality = "VALID"
+        elif qualities == {"REJECTED"}:
+            quality = "REJECTED"
+        else:
+            quality = "REVIEW"
+        points.append(ClimatePoint(
+            timestamp=start,
+            values={name: round(sum(numbers) / len(numbers), 2) for name, numbers in sums.items()},
+            quality_status=quality,
+        ))
+    return points
+
+
 def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None = None,
-                      rejected_records: int = 0, source: str = "ThingSpeak") -> ClimateSummary:
+                      rejected_records: int = 0, source: str = "ThingSpeak",
+                      resolution: Literal["raw", "hour", "day"] = "raw") -> ClimateSummary:
     rows: list[dict[str, Any]] = []
     measurement_keys: set[str] = set()
     normalized: list[tuple[datetime, dict[str, float | None], str]] = []
@@ -73,7 +112,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
     normalized.sort(key=lambda item: item[0])
     if not normalized:
         return ClimateSummary(available=False, source=source, channel_id=channel_id, records=0,
-                              rejected_records=rejected_records, message="Ainda não há leituras climáticas disponíveis.")
+                              resolution=resolution, rejected_records=rejected_records, message="Ainda não há leituras climáticas disponíveis.")
 
     frame = pd.DataFrame(rows).sort_values("timestamp", kind="stable")
     metrics: dict[str, MetricSummary] = {}
@@ -94,7 +133,13 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
             samples=int(present.size),
         )
 
-    points = [ClimatePoint(timestamp=stamp, values=values, quality_status=quality if quality in {"VALID", "REVIEW", "REJECTED"} else "REVIEW") for stamp, values, quality in normalized]
+    normalized = [(stamp, values, quality if quality in {"VALID", "REVIEW", "REJECTED"} else "REVIEW")
+                  for stamp, values, quality in normalized]
+    if resolution == "raw":
+        points = [ClimatePoint(timestamp=stamp, values=values, quality_status=quality)
+                  for stamp, values, quality in normalized]
+    else:
+        points = aggregate_series(normalized, resolution)
     latest_at = normalized[-1][0]
     return ClimateSummary(
         available=True,
@@ -102,6 +147,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
         channel_id=channel_id,
         latest_at=latest_at,
         records=len(normalized),
+        resolution=resolution,
         metrics=metrics,
         series=points,
         rejected_records=rejected_records,

@@ -50,12 +50,17 @@ class ClimatePoint(ApiModel):
     quality_status: Literal["VALID", "REVIEW", "REJECTED"] = "VALID"
 
 
+Resolution = Literal["raw", "hour", "day"]
+
+
 class ClimateSummary(ApiModel):
     available: bool
     source: str
     channel_id: str | None = None
     latest_at: datetime | None = None
     records: int = 0
+    # Resolução da `series`. As `metrics` são sempre calculadas sobre as leituras brutas.
+    resolution: Resolution = "raw"
     metrics: dict[str, MetricSummary] = Field(default_factory=dict)
     series: list[ClimatePoint] = Field(default_factory=list)
     rejected_records: int = 0

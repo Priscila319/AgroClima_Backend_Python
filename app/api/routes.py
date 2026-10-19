@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 
+from app.cache import TTLCache, token_key
 from app.clients.java_api import JavaApiClient
 from app.errors import ServiceError
 from app.models import (
     AnalystDashboard,
+    ClimateSummary,
     ComparisonSummary,
     ForecastSummary,
     MarketSummary,
@@ -17,7 +19,7 @@ from app.models import (
     SyncSummary,
     UserProfile,
 )
-from app.services.dashboard import DashboardService
+from app.services.dashboard import DashboardService, resolve_window
 
 router = APIRouter(prefix="/api/v1", tags=["Análises e dashboards"])
 
@@ -40,16 +42,28 @@ async def current_context(
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> RequestContext:
-    """Valida o JWT na API Java: a autenticação e os papéis continuam sendo decididos pelo Java."""
+    """Valida o JWT na API Java: a autenticação e os papéis continuam sendo decididos pelo Java.
+
+    O perfil validado fica em cache por poucos segundos (PROFILE_CACHE_TTL_SECONDS) para não chamar
+    /api/auth/me em todo request. Só perfis ativos entram no cache; erros nunca são cacheados.
+    """
     if not authorization or not authorization.lower().startswith("bearer ") or not authorization[7:].strip():
         raise ServiceError(401, "Autenticação Bearer obrigatória.")
-    profile_data = await _java(request).current_user(authorization)
-    try:
-        profile = UserProfile.model_validate(profile_data)
-    except Exception as exception:
-        raise ServiceError(502, "A API Java retornou um perfil de usuário inválido.") from exception
-    if profile.status.upper() not in {"ACTIVE", "ATIVO"}:
-        raise ServiceError(401, "A conta não está ativa.")
+
+    cache: TTLCache[UserProfile] | None = getattr(request.app.state, "profile_cache", None)
+    key = token_key(authorization)
+    profile = cache.get(key) if cache is not None else None
+
+    if profile is None:
+        profile_data = await _java(request).current_user(authorization)
+        try:
+            profile = UserProfile.model_validate(profile_data)
+        except Exception as exception:
+            raise ServiceError(502, "A API Java retornou um perfil de usuário inválido.") from exception
+        if profile.status.upper() not in {"ACTIVE", "ATIVO"}:
+            raise ServiceError(401, "A conta não está ativa.")
+        if cache is not None:
+            cache.set(key, profile)
     return RequestContext(user=profile, authorization=authorization)
 
 
@@ -58,16 +72,7 @@ def _require_role(context: RequestContext, allowed: set[str]) -> None:
         raise ServiceError(403, "Seu perfil não tem permissão para este recurso.")
 
 
-def _date_window(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
-    if start is None and end is None:
-        end = datetime.now(UTC)
-        start = end - timedelta(hours=24)
-    elif start is None or end is None:
-        raise ServiceError(400, "Informe as duas datas: start e end.")
-    return start, end
-
-
-@router.get("/climate/current")
+@router.get("/climate/current", response_model=ClimateSummary)
 async def current_climate(context: Annotated[RequestContext, Depends(current_context)], request: Request):
     end = datetime.now(UTC)
     start = end - timedelta(hours=24)
@@ -75,16 +80,23 @@ async def current_climate(context: Annotated[RequestContext, Depends(current_con
     return summary
 
 
-@router.get("/climate/history")
+@router.get("/climate/history", response_model=ClimateSummary)
 async def climate_history(
     _: Annotated[RequestContext, Depends(current_context)],
     request: Request,
     start: datetime | None = Query(default=None, description="Data inicial ISO 8601 com fuso horário."),
     end: datetime | None = Query(default=None, description="Data final ISO 8601 com fuso horário."),
+    resolution: Literal["auto", "raw", "hour", "day"] = Query(
+        default="auto",
+        description=(
+            "Resolução da série. `auto`: até 48 h bruto, até 31 dias por hora, acima disso por dia. "
+            "`raw` é recusado se o período tiver mais leituras que o limite configurado. "
+            "As métricas (média, mínimo, máximo) sempre usam as leituras brutas."
+        ),
+    ),
 ):
-    start, end = _date_window(start, end)
-    summary, _ = await _service(request).climate_summary(start, end)
-    return summary
+    start, end = resolve_window(start, end)
+    return await _service(request).climate_history(start, end, resolution)
 
 
 @router.get("/dashboard/summary")
@@ -106,17 +118,7 @@ async def analyst_dashboard(
     end: datetime | None = Query(default=None),
 ):
     _require_role(context, {"ANALYST", "ADMIN"})
-    start, end = _date_window(start, end)
-    service = _service(request)
-    summary = await service.dashboard_summary(context.authorization)
-    quality = QualitySummary.model_validate(await service.quality_summary(start, end))
-    comparison = ComparisonSummary(
-        available=summary.climate.available or summary.plantations.total_plantations > 0,
-        climate_metrics=summary.climate.metrics,
-        plantations_by_variety=summary.plantations.by_variety,
-        limitation="As leituras climáticas são agregadas por canal. Não há vínculo entre sensor e variedade no cadastro atual.",
-    )
-    return AnalystDashboard(summary=summary, quality=quality, comparison=comparison, generated_at=datetime.now(UTC))
+    return await _service(request).analyst_dashboard(context.authorization, start, end)
 
 
 @router.get("/dashboard/quality", response_model=QualitySummary)
@@ -127,7 +129,7 @@ async def climate_quality(
     end: datetime | None = Query(default=None),
 ):
     _require_role(context, {"ANALYST", "ADMIN"})
-    start, end = _date_window(start, end)
+    start, end = resolve_window(start, end)
     result = await _service(request).quality_summary(start, end)
     return QualitySummary.model_validate(result)
 

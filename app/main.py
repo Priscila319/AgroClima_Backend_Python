@@ -13,6 +13,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import RedirectResponse
 
 from app.api.routes import router
+from app.cache import TTLCache
 from app.config import Settings
 from app.errors import (
     ServiceError,
@@ -32,6 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = app_settings
+        app.state.profile_cache = TTLCache(app_settings.profile_cache_ttl_seconds)
         app.state.http_client = httpx.AsyncClient(timeout=app_settings.request_timeout_seconds)
         try:
             yield
@@ -72,7 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.configured_origins,
-        allow_credentials=True,
+        allow_credentials=app_settings.cors_allow_credentials,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Accept"],
     )
