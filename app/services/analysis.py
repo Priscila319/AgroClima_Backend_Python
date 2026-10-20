@@ -36,6 +36,14 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _coerce_quality(value: str) -> Literal["VALID", "REVIEW", "REJECTED"]:
+    if value == "VALID":
+        return "VALID"
+    if value == "REJECTED":
+        return "REJECTED"
+    return "REVIEW"
+
+
 def _metric_key(value: str) -> str:
     return value.lower().replace("_", "")
 
@@ -112,7 +120,8 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
     normalized.sort(key=lambda item: item[0])
     if not normalized:
         return ClimateSummary(available=False, source=source, channel_id=channel_id, records=0,
-                              resolution=resolution, rejected_records=rejected_records, message="Ainda não há leituras climáticas disponíveis.")
+                              resolution=resolution, rejected_records=rejected_records,
+                              message="Ainda não há leituras climáticas disponíveis.")
 
     frame = pd.DataFrame(rows).sort_values("timestamp", kind="stable")
     metrics: dict[str, MetricSummary] = {}
@@ -136,7 +145,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
     normalized = [(stamp, values, quality if quality in {"VALID", "REVIEW", "REJECTED"} else "REVIEW")
                   for stamp, values, quality in normalized]
     if resolution == "raw":
-        points = [ClimatePoint(timestamp=stamp, values=values, quality_status=quality)
+        points = [ClimatePoint(timestamp=stamp, values=values, quality_status=_coerce_quality(quality))
                   for stamp, values, quality in normalized]
     else:
         points = aggregate_series(normalized, resolution)
@@ -167,7 +176,8 @@ def summarize_quality(readings: list[dict[str, Any]], *, expected_metrics: set[s
             review += 1
         elif status == "REJECTED":
             rejected += 1
-        values = reading.get("measurements") if isinstance(reading.get("measurements"), dict) else {}
+        measurements = reading.get("measurements")
+        values: dict[str, Any] = measurements if isinstance(measurements, dict) else {}
         expected = expected_metrics or set(values)
         expected_cells += len(expected)
         measured_cells += sum(1 for key in expected if values.get(key) is not None)

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+import logging
 from typing import Any
 
 import httpx
 
 from app.config import Settings
 from app.errors import ServiceError
+
+logger = logging.getLogger("agroclima.java_client")
+
+# Falhas transitórias: vale tentar de novo (apenas em GET, que é idempotente).
+RETRYABLE_STATUS = frozenset({502, 503, 504})
 
 
 class JavaApiClient:
@@ -31,7 +38,8 @@ class JavaApiClient:
             raise ServiceError(502, "A API Java retornou uma resposta inválida para plantações.")
         return result
 
-    async def climate_readings(self, start: datetime, end: datetime, channel_id: str | None = None) -> list[dict[str, Any]]:
+    async def climate_readings(self, start: datetime, end: datetime,
+                               channel_id: str | None = None) -> list[dict[str, Any]]:
         """Leituras de temperatura e umidade persistidas pela API Java, lidas com a credencial de serviço."""
         if not self.settings.internal_key_configured:
             raise ServiceError(503, "A integração interna com a API Java não está configurada (INTERNAL_API_KEY).")
@@ -65,20 +73,58 @@ class JavaApiClient:
     def _service_headers(self) -> dict[str, str]:
         return {"X-Internal-Api-Key": self.settings.internal_api_key.get_secret_value()}
 
+    async def ping(self) -> bool:
+        """Verifica se a API Java responde (usado por /ready). Qualquer resposta < 500 conta como "no ar"."""
+        try:
+            response = await self.client.get(f"{self.base_url}/actuator/health", timeout=3.0)
+        except httpx.RequestError as exception:
+            logger.warning("API Java inacessível no /ready: %s", type(exception).__name__)
+            return False
+        return response.status_code < 500
+
     async def _request(self, method: str, path: str, *, authorization: str | None = None,
                        params: dict[str, str] | None = None, json: dict[str, Any] | None = None,
                        headers: dict[str, str] | None = None) -> Any:
         request_headers = dict(headers or {})
         if authorization:
             request_headers["Authorization"] = authorization
-        try:
-            response = await self.client.request(method, f"{self.base_url}{path}", params=params,
-                                                 json=json, headers=request_headers)
-        except httpx.TimeoutException as exception:
-            raise ServiceError(503, "A API Java excedeu o tempo de resposta.") from exception
-        except httpx.RequestError as exception:
-            raise ServiceError(503, "Não foi possível conectar à API Java.") from exception
+        # POST (sincronização) nunca é repetido: poderia disparar a operação duas vezes.
+        attempts = self.settings.java_retry_attempts if method == "GET" else 1
 
+        for attempt in range(1, attempts + 1):
+            is_last = attempt == attempts
+            try:
+                response = await self.client.request(method, f"{self.base_url}{path}", params=params,
+                                                     json=json, headers=request_headers)
+            except httpx.TimeoutException as exception:
+                if not is_last:
+                    await self._backoff(attempt, attempts, method, path, "timeout")
+                    continue
+                logger.exception("Timeout na API Java method=%s path=%s tentativas=%d", method, path, attempt)
+                raise ServiceError(503, "A API Java excedeu o tempo de resposta.") from exception
+            except httpx.RequestError as exception:
+                if not is_last:
+                    await self._backoff(attempt, attempts, method, path, type(exception).__name__)
+                    continue
+                logger.exception("Falha de conexão com a API Java method=%s path=%s tentativas=%d",
+                                 method, path, attempt)
+                raise ServiceError(503, "Não foi possível conectar à API Java.") from exception
+
+            if response.status_code in RETRYABLE_STATUS and not is_last:
+                await self._backoff(attempt, attempts, method, path, f"HTTP {response.status_code}")
+                continue
+            return self._parse(response)
+
+        raise AssertionError("unreachable: o laço sempre retorna ou levanta na última tentativa")
+
+    async def _backoff(self, attempt: int, attempts: int, method: str, path: str, reason: str) -> None:
+        delay = self.settings.java_retry_backoff_seconds * (2 ** (attempt - 1))
+        logger.warning("API Java falhou (%s) method=%s path=%s tentativa=%d/%d; nova tentativa em %.2fs",
+                       reason, method, path, attempt, attempts, delay)
+        await asyncio.sleep(delay)
+
+    @staticmethod
+    def _parse(response: httpx.Response) -> Any:
         if response.status_code == 401:
             raise ServiceError(401, "Sessão inválida ou expirada.")
         if response.status_code == 403:

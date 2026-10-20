@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
+import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -13,14 +14,17 @@ from app.models import (
     AnalystDashboard,
     ClimateSummary,
     ComparisonSummary,
+    DashboardSummary,
     ForecastSummary,
+    IntegrationStatus,
     MarketSummary,
     QualitySummary,
     SyncSummary,
     UserProfile,
 )
-from app.services.dashboard import DashboardService, resolve_window
+from app.services.dashboard import DashboardService
 
+logger = logging.getLogger("agroclima.api")
 router = APIRouter(prefix="/api/v1", tags=["Análises e dashboards"])
 
 
@@ -59,6 +63,7 @@ async def current_context(
         try:
             profile = UserProfile.model_validate(profile_data)
         except Exception as exception:
+            logger.exception("Perfil de usuário inválido retornado pela API Java")
             raise ServiceError(502, "A API Java retornou um perfil de usuário inválido.") from exception
         if profile.status.upper() not in {"ACTIVE", "ATIVO"}:
             raise ServiceError(401, "A conta não está ativa.")
@@ -73,11 +78,10 @@ def _require_role(context: RequestContext, allowed: set[str]) -> None:
 
 
 @router.get("/climate/current", response_model=ClimateSummary)
-async def current_climate(context: Annotated[RequestContext, Depends(current_context)], request: Request):
-    end = datetime.now(UTC)
-    start = end - timedelta(hours=24)
-    summary, _ = await _service(request).climate_summary(start, end)
-    return summary
+async def current_climate(
+    _: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> ClimateSummary:
+    return await _service(request).current_climate()
 
 
 @router.get("/climate/history", response_model=ClimateSummary)
@@ -94,18 +98,22 @@ async def climate_history(
             "As métricas (média, mínimo, máximo) sempre usam as leituras brutas."
         ),
     ),
-):
-    start, end = resolve_window(start, end)
+) -> ClimateSummary:
     return await _service(request).climate_history(start, end, resolution)
 
 
-@router.get("/dashboard/summary")
-async def dashboard_summary(context: Annotated[RequestContext, Depends(current_context)], request: Request):
+@router.get("/dashboard/summary", response_model=DashboardSummary)
+async def dashboard_summary(
+    context: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> DashboardSummary:
     return await _service(request).dashboard_summary(context.authorization)
 
 
-@router.get("/dashboard/producer")
-async def producer_dashboard(context: Annotated[RequestContext, Depends(current_context)], request: Request):
+@router.get("/dashboard/producer", response_model=DashboardSummary, deprecated=True)
+async def producer_dashboard(
+    context: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> DashboardSummary:
+    """Alias de /dashboard/summary restrito a PRODUCER/ADMIN; use /dashboard/summary."""
     _require_role(context, {"PRODUCER", "ADMIN"})
     return await _service(request).dashboard_summary(context.authorization)
 
@@ -116,7 +124,7 @@ async def analyst_dashboard(
     request: Request,
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
-):
+) -> AnalystDashboard:
     _require_role(context, {"ANALYST", "ADMIN"})
     return await _service(request).analyst_dashboard(context.authorization, start, end)
 
@@ -127,37 +135,33 @@ async def climate_quality(
     request: Request,
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
-):
+) -> QualitySummary:
     _require_role(context, {"ANALYST", "ADMIN"})
-    start, end = resolve_window(start, end)
-    result = await _service(request).quality_summary(start, end)
-    return QualitySummary.model_validate(result)
+    return await _service(request).quality_summary(start, end)
 
 
 @router.get("/dashboard/comparison", response_model=ComparisonSummary)
-async def comparison_dashboard(context: Annotated[RequestContext, Depends(current_context)], request: Request):
+async def comparison_dashboard(
+    context: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> ComparisonSummary:
     _require_role(context, {"ANALYST", "ADMIN"})
-    summary = await _service(request).dashboard_summary(context.authorization)
-    return ComparisonSummary(
-        available=summary.climate.available or summary.plantations.total_plantations > 0,
-        climate_metrics=summary.climate.metrics,
-        plantations_by_variety=summary.plantations.by_variety,
-        limitation="Não existe associação entre leituras de canal e variedade; não são inferidos rendimentos por uva.",
-    )
+    return await _service(request).comparison_summary(context.authorization)
 
 
 @router.get("/dashboard/market", response_model=MarketSummary)
-async def market_dashboard(_: Annotated[RequestContext, Depends(current_context)]):
+async def market_dashboard(_: Annotated[RequestContext, Depends(current_context)]) -> MarketSummary:
     return MarketSummary()
 
 
 @router.get("/dashboard/forecast", response_model=ForecastSummary)
-async def forecast_dashboard(_: Annotated[RequestContext, Depends(current_context)]):
+async def forecast_dashboard(_: Annotated[RequestContext, Depends(current_context)]) -> ForecastSummary:
     return ForecastSummary()
 
 
-@router.get("/integrations/thingspeak/status")
-async def thingspeak_status(context: Annotated[RequestContext, Depends(current_context)], request: Request):
+@router.get("/integrations/thingspeak/status", response_model=IntegrationStatus)
+async def thingspeak_status(
+    context: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> IntegrationStatus:
     """Status da integração ThingSpeak, lido do backend Java (ADMIN)."""
     _require_role(context, {"ADMIN"})
     return await _service(request).integration_status(context.authorization)
@@ -167,9 +171,11 @@ async def thingspeak_status(context: Annotated[RequestContext, Depends(current_c
 async def synchronize_thingspeak(
     context: Annotated[RequestContext, Depends(current_context)],
     request: Request,
-    start: datetime | None = Query(default=None, alias="from", description="Início opcional para reprocessar um período."),
-    end: datetime | None = Query(default=None, alias="to", description="Fim opcional para reprocessar um período."),
-):
+    start: datetime | None = Query(
+        default=None, alias="from", description="Início opcional para reprocessar um período."),
+    end: datetime | None = Query(
+        default=None, alias="to", description="Fim opcional para reprocessar um período."),
+) -> SyncSummary:
     """Dispara a sincronização no backend Java (ADMIN). O Python não acessa o ThingSpeak."""
     _require_role(context, {"ADMIN"})
     return await _service(request).sync_latest(context.authorization, start, end)

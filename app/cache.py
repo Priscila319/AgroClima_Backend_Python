@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import hashlib
 import time
-from typing import Callable, Generic, TypeVar
+from typing import Generic, TypeVar
 
 V = TypeVar("V")
 

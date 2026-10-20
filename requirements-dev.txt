@@ -1,3 +1,5 @@
 # Dependências de desenvolvimento e testes (não vão para a imagem de produção).
 -r requirements.txt
 pytest>=8.3,<9.0
+ruff>=0.8
+mypy>=1.13

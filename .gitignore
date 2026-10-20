@@ -11,3 +11,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

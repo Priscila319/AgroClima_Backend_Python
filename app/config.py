@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # Origens liberadas apenas em desenvolvimento (front local). Em produção a lista é sempre explícita.
 DEV_CORS_ORIGINS = (
     "http://localhost,http://localhost:3000,http://localhost:5173,http://localhost:5500,http://localhost:8081,"
@@ -33,6 +32,9 @@ class Settings(BaseSettings):
     java_api_url: str = "http://localhost:8080"
     internal_api_key: SecretStr = SecretStr("")
     request_timeout_seconds: float = 12.0
+    # Retry com backoff exponencial só para GET na API Java (falha de conexão, timeout, 502/503/504).
+    java_retry_attempts: int = 3
+    java_retry_backoff_seconds: float = 0.25
     app_env: Literal["development", "production"] = "development"
     # Vazio em desenvolvimento = origens locais; em produção é obrigatório informar (sem wildcard).
     cors_allowed_origins: str = ""
@@ -59,6 +61,20 @@ class Settings(BaseSettings):
             raise ValueError("REQUEST_TIMEOUT_SECONDS deve estar entre 1 e 60 segundos.")
         return value
 
+    @field_validator("java_retry_attempts")
+    @classmethod
+    def validate_retry_attempts(cls, value: int) -> int:
+        if value < 1 or value > 5:
+            raise ValueError("JAVA_RETRY_ATTEMPTS deve estar entre 1 e 5 (1 = sem retry).")
+        return value
+
+    @field_validator("java_retry_backoff_seconds")
+    @classmethod
+    def validate_retry_backoff(cls, value: float) -> float:
+        if value < 0 or value > 5:
+            raise ValueError("JAVA_RETRY_BACKOFF_SECONDS deve estar entre 0 e 5 segundos.")
+        return value
+
     @field_validator("profile_cache_ttl_seconds")
     @classmethod
     def validate_cache_ttl(cls, value: float) -> float:
@@ -74,7 +90,7 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_cors(self) -> "Settings":
+    def validate_cors(self) -> Settings:
         origins = self._parse_origins(self.cors_allowed_origins)
         if "*" in origins:
             raise ValueError("CORS_ALLOWED_ORIGINS não aceita wildcard (*); liste as origens explicitamente.")

@@ -7,13 +7,13 @@ A API Java é simulada por MockTransport com a mesma persistência em memória e
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 import json
 import re
-from datetime import UTC, datetime, timedelta
 
+from fastapi.testclient import TestClient
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app

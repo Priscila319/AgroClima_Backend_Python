@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
-from typing import AsyncIterator
+from typing import Any
 
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import httpx
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from swagger_ui_bundle import swagger_ui_path
 
 from app.api.routes import router
 from app.cache import TTLCache
+from app.clients.java_api import JavaApiClient
 from app.config import Settings
 from app.errors import (
     ServiceError,
@@ -22,8 +27,10 @@ from app.errors import (
     unhandled_error_handler,
     validation_error_handler,
 )
+from app.logging_config import REQUEST_ID_HEADER, RequestIdMiddleware, configure_logging
+from app.models import HealthResponse, ReadyResponse
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_logging()
 logger = logging.getLogger("agroclima.api")
 
 
@@ -56,7 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.settings = app_settings
 
     # Compatibilidade com Swagger UI: Força a versão do OpenAPI para 3.0.3
-    def custom_openapi():
+    def custom_openapi() -> dict[str, Any]:
         if application.openapi_schema:
             return application.openapi_schema
         openapi_schema = get_openapi(
@@ -69,57 +76,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.openapi_schema = openapi_schema
         return application.openapi_schema
 
-    application.openapi = custom_openapi
+    application.openapi = custom_openapi  # type: ignore[method-assign]
 
     application.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.configured_origins,
         allow_credentials=app_settings.cors_allow_credentials,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept"],
+        allow_headers=["Authorization", "Content-Type", "Accept", REQUEST_ID_HEADER],
+        expose_headers=[REQUEST_ID_HEADER],
     )
+    # Por último = camada mais externa: todo request (inclusive erros de CORS) recebe um X-Request-ID.
+    application.add_middleware(RequestIdMiddleware)
     application.include_router(router)
-    application.add_exception_handler(ServiceError, service_error_handler)
-    application.add_exception_handler(RequestValidationError, validation_error_handler)
-    application.add_exception_handler(400, http_error_handler)
-    application.add_exception_handler(401, http_error_handler)
-    application.add_exception_handler(403, http_error_handler)
-    application.add_exception_handler(404, http_error_handler)
-    application.add_exception_handler(405, http_error_handler)
-    application.add_exception_handler(422, http_error_handler)
-    application.add_exception_handler(500, http_error_handler)
+    application.mount("/static/swagger-ui", StaticFiles(directory=swagger_ui_path), name="swagger-ui")
+    application.add_exception_handler(ServiceError, service_error_handler)  # type: ignore[arg-type]
+    application.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore[arg-type]
+    for status_code in (400, 401, 403, 404, 405, 422, 500):
+        application.add_exception_handler(status_code, http_error_handler)  # type: ignore[arg-type]
+    application.add_exception_handler(StarletteHTTPException, http_error_handler)  # type: ignore[arg-type]
     application.add_exception_handler(Exception, unhandled_error_handler)
 
     @application.get("/", include_in_schema=False)
-    async def root():
+    async def root() -> dict[str, str]:
         """Rota raiz para evitar erro 404 Not Found ao acessar o host base."""
         return {
             "status": "UP",
             "service": app_settings.service_name,
             "docs": "/docs",
             "health": "/health",
+            "ready": "/ready",
         }
 
     @application.get("/docs", include_in_schema=False, tags=["Operação"])
-    async def local_swagger_ui(request: Request):
+    async def local_swagger_ui(request: Request) -> HTMLResponse:
         root_path = request.scope.get("root_path", "").rstrip("/")
         openapi_url = f"{root_path}{application.openapi_url}"
         return get_swagger_ui_html(
             openapi_url=openapi_url,
             title=f"{application.title} - Swagger UI",
-            swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
-            swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+            swagger_js_url=f"{root_path}/static/swagger-ui/swagger-ui-bundle.js",
+            swagger_css_url=f"{root_path}/static/swagger-ui/swagger-ui.css",
+            swagger_favicon_url=f"{root_path}/static/swagger-ui/favicon-32x32.png",
         )
 
-    @application.get("/health", tags=["Operação"])
-    async def health(request: Request):
+    @application.get("/health", tags=["Operação"], response_model=HealthResponse)
+    async def health(request: Request) -> HealthResponse:
+        """Liveness: o processo está de pé. Não consulta dependências (use /ready para isso)."""
         settings: Settings = request.app.state.settings
-        return {
-            "status": "UP",
-            "service": settings.service_name,
-            "javaApiConfigured": bool(settings.java_api_url),
-            "internalKeyConfigured": settings.internal_key_configured,
+        return HealthResponse(
+            service=settings.service_name,
+            java_api_configured=bool(settings.java_api_url),
+            internal_key_configured=settings.internal_key_configured,
+        )
+
+    @application.get("/ready", tags=["Operação"], response_model=ReadyResponse,
+                     responses={503: {"model": ReadyResponse, "description": "Dependência indisponível."}})
+    async def ready(request: Request) -> ReadyResponse | JSONResponse:
+        """Readiness: chave interna configurada e API Java respondendo. 503 quando não está pronto."""
+        settings: Settings = request.app.state.settings
+        client = JavaApiClient(settings, request.app.state.http_client)
+        checks = {
+            "internalKey": settings.internal_key_configured,
+            "javaApi": await client.ping(),
         }
+        is_ready = all(checks.values())
+        body = ReadyResponse(
+            status="READY" if is_ready else "NOT_READY",
+            service=settings.service_name,
+            checks=checks,
+            message=None if is_ready else "Uma ou mais dependências não estão disponíveis.",
+        )
+        if is_ready:
+            return body
+        logger.warning("Readiness falhou: %s", checks)
+        return JSONResponse(status_code=503, content=body.model_dump(mode="json", by_alias=True),
+                            headers={REQUEST_ID_HEADER: getattr(request.state, "request_id", "-")})
 
     return application
 

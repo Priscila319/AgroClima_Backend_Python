@@ -11,6 +11,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.logging_config import REQUEST_ID_HEADER, request_id_var
+
+logger = logging.getLogger("agroclima.api")
+
 
 class ServiceError(Exception):
     def __init__(self, status_code: int, message: str, field_errors: dict[str, str] | None = None):
@@ -28,6 +32,11 @@ class ApiError(BaseModel):
     message: str
     path: str
     fieldErrors: dict[str, str]
+    requestId: str | None = None
+
+
+def _request_id(request: Request) -> str | None:
+    return getattr(request.state, "request_id", None)
 
 
 def error_payload(request: Request, status: int, message: str,
@@ -43,22 +52,28 @@ def error_payload(request: Request, status: int, message: str,
         message=message,
         path=request.url.path,
         fieldErrors=field_errors or {},
+        requestId=_request_id(request),
     ).model_dump(mode="json")
 
 
+def _error_response(request: Request, status: int, message: str,
+                    field_errors: dict[str, str] | None = None) -> JSONResponse:
+    headers = {REQUEST_ID_HEADER: rid} if (rid := _request_id(request)) else None
+    return JSONResponse(status_code=status, content=error_payload(request, status, message, field_errors),
+                        headers=headers)
+
+
 async def service_error_handler(request: Request, exception: ServiceError) -> JSONResponse:
-    return JSONResponse(
-        status_code=exception.status_code,
-        content=error_payload(request, exception.status_code, exception.message, exception.field_errors),
-    )
+    if exception.status_code >= 500:
+        # 5xx de negócio (ex.: Java fora do ar) merece rastro; a causa original vem em __cause__.
+        logger.error("Falha de serviço status=%s method=%s path=%s: %s", exception.status_code,
+                     request.method, request.url.path, exception.message, exc_info=exception.__cause__)
+    return _error_response(request, exception.status_code, exception.message, exception.field_errors)
 
 
 async def http_error_handler(request: Request, exception: StarletteHTTPException) -> JSONResponse:
     message = exception.detail if isinstance(exception.detail, str) else "A requisição não pôde ser processada."
-    return JSONResponse(
-        status_code=exception.status_code,
-        content=error_payload(request, exception.status_code, message),
-    )
+    return _error_response(request, exception.status_code, message)
 
 
 async def validation_error_handler(request: Request, exception: RequestValidationError) -> JSONResponse:
@@ -66,14 +81,16 @@ async def validation_error_handler(request: Request, exception: RequestValidatio
     for error in exception.errors():
         location = ".".join(str(part) for part in error.get("loc", ()) if part != "body") or "request"
         fields.setdefault(location, error.get("msg", "Valor inválido."))
-    return JSONResponse(
-        status_code=400,
-        content=error_payload(request, 400, "Revise os campos informados.", fields),
-    )
+    return _error_response(request, 400, "Revise os campos informados.", fields)
 
 
 async def unhandled_error_handler(request: Request, exception: Exception) -> JSONResponse:
-    logging.getLogger("agroclima.api").error(
-        "Unhandled request failure path=%s type=%s", request.url.path, type(exception).__name__
-    )
-    return JSONResponse(status_code=500, content=error_payload(request, 500, "Ocorreu um erro interno."))
+    # Este handler roda fora do RequestIdMiddleware (no ServerErrorMiddleware): restaura o id para o log.
+    token = request_id_var.set(_request_id(request) or "-")
+    try:
+        # logger.exception registra o traceback completo; o cliente recebe só o request_id para suporte.
+        logger.exception("Erro não tratado method=%s path=%s", request.method, request.url.path,
+                         exc_info=exception)
+    finally:
+        request_id_var.reset(token)
+    return _error_response(request, 500, "Ocorreu um erro interno.")

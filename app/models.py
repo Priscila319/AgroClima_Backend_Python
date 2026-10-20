@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
@@ -15,6 +16,14 @@ def to_camel(name: str) -> str:
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
+
+
+class PlantationStatus(StrEnum):
+    """Estado normalizado de uma plantação (o Java pode devolver textos como "Ativa" ou "Colhida")."""
+
+    GROWING = "GROWING"
+    HARVESTED = "HARVESTED"
+    ARCHIVED = "ARCHIVED"
 
 
 class UserProfile(ApiModel):
@@ -144,3 +153,27 @@ class SyncSummary(ApiModel):
     already_present: int = 0
     synchronized_at: datetime | None = None
     message: str
+
+
+class IntegrationStatus(ApiModel):
+    """Status do ThingSpeak vindo do Java. Campos extras são mantidos: o Java é a fonte do contrato."""
+
+    model_config = ConfigDict(extra="allow")
+
+    configured: bool | None = None
+    channel_id: str | None = None
+    message: str | None = None
+
+
+class HealthResponse(ApiModel):
+    status: Literal["UP"] = "UP"
+    service: str
+    java_api_configured: bool
+    internal_key_configured: bool
+
+
+class ReadyResponse(ApiModel):
+    status: Literal["READY", "NOT_READY"]
+    service: str
+    checks: dict[str, bool]
+    message: str | None = None

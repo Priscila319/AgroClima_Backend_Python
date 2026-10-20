@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import httpx
-import pytest
 from fastapi.testclient import TestClient
+import httpx
 from pydantic import ValidationError
+import pytest
 
 from app.cache import TTLCache, token_key
 from app.config import Settings

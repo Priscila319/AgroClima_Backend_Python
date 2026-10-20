@@ -14,7 +14,9 @@ from app.models import (
     ClimateSummary,
     ComparisonSummary,
     DashboardSummary,
+    IntegrationStatus,
     PlantationByVariety,
+    PlantationStatus,
     PlantationSummary,
     QualitySummary,
     SourceAvailability,
@@ -24,6 +26,10 @@ from app.services.analysis import summarize_climate, summarize_quality
 
 HistoryResolution = Literal["auto", "raw", "hour", "day"]
 EXPECTED_METRICS = {"temperature", "humidity"}
+COMPARISON_LIMITATION = (
+    "As leituras climáticas são agregadas por canal. Não há vínculo entre sensor e variedade no cadastro "
+    "atual; não são inferidos rendimentos por uva."
+)
 
 
 def resolve_window(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
@@ -44,6 +50,16 @@ def pick_resolution(start: datetime, end: datetime) -> Literal["raw", "hour", "d
     if span <= timedelta(days=31):
         return "hour"
     return "day"
+
+
+def classify_plantation(plantation: dict[str, Any]) -> PlantationStatus:
+    """Normaliza o estado de uma plantação do Java no enum PlantationStatus (arquivada > colhida > ativa)."""
+    status = str(plantation.get("status", "")).casefold()
+    if plantation.get("archivedAt") or "arquiv" in status:
+        return PlantationStatus.ARCHIVED
+    if plantation.get("harvestedAt") or plantation.get("harvestDate") or "colhid" in status or "harvest" in status:
+        return PlantationStatus.HARVESTED
+    return PlantationStatus.GROWING
 
 
 class DashboardService:
@@ -67,8 +83,14 @@ class DashboardService:
         result = await self.java.thingspeak_sync(authorization, start, end)
         return SyncSummary.model_validate(result)
 
-    async def integration_status(self, authorization: str) -> dict[str, Any]:
-        return await self.java.thingspeak_status(authorization)
+    async def integration_status(self, authorization: str) -> IntegrationStatus:
+        return IntegrationStatus.model_validate(await self.java.thingspeak_status(authorization))
+
+    async def current_climate(self) -> ClimateSummary:
+        """Últimas 24 h de leituras (janela fixa)."""
+        end = datetime.now(UTC)
+        summary, _ = await self.climate_summary(end - timedelta(hours=24), end)
+        return summary
 
     async def climate_summary(self, start: datetime, end: datetime,
                               resolution: Literal["raw", "hour", "day"] = "raw",
@@ -77,9 +99,10 @@ class DashboardService:
         readings = await self.java.climate_readings(start, end)
         return self._summarize(readings, resolution), readings
 
-    async def climate_history(self, start: datetime, end: datetime,
+    async def climate_history(self, start: datetime | None, end: datetime | None,
                               resolution: HistoryResolution = "auto") -> ClimateSummary:
         """Histórico com a série agregada por hora/dia para não devolver até 366 dias de leituras brutas."""
+        start, end = resolve_window(start, end)
         self._validate_range(start, end)
         chosen = pick_resolution(start, end) if resolution == "auto" else resolution
         readings = await self.java.climate_readings(start, end)
@@ -105,21 +128,19 @@ class DashboardService:
         for plantation in plantations:
             variety = str(plantation.get("variety") or "Não informado")
             quantity = self._int_value(plantation.get("quantity"))
-            status = str(plantation.get("status", "")).casefold()
-            is_archived = bool(plantation.get("archivedAt")) or "arquiv" in status
-            is_harvested = bool(plantation.get("harvestedAt") or plantation.get("harvestDate")) or "colhid" in status or "harvest" in status
+            status = classify_plantation(plantation)
             total_plants += quantity
-            if is_archived:
-                archived += 1
-            elif is_harvested:
-                harvested += 1
-            else:
-                growing += 1
             bucket = grouped.setdefault(variety, {"plantations": 0, "plants": 0, "growing": 0, "harvested": 0})
             bucket["plantations"] += 1
             bucket["plants"] += quantity
-            if not is_archived:
-                bucket["harvested" if is_harvested else "growing"] += 1
+            if status is PlantationStatus.ARCHIVED:
+                archived += 1
+            elif status is PlantationStatus.HARVESTED:
+                harvested += 1
+                bucket["harvested"] += 1
+            else:
+                growing += 1
+                bucket["growing"] += 1
 
         by_variety = [PlantationByVariety(variety=name, **values) for name, values in sorted(grouped.items())]
         result = PlantationSummary(total_plantations=len(plantations), growing=growing, harvested=harvested,
@@ -161,18 +182,27 @@ class DashboardService:
 
         summary = self._build_dashboard(climate, plantations)
         quality = QualitySummary.model_validate(summarize_quality(readings, expected_metrics=EXPECTED_METRICS))
-        comparison = ComparisonSummary(
-            available=climate.available or plantations.total_plantations > 0,
-            climate_metrics=climate.metrics,
-            plantations_by_variety=plantations.by_variety,
-            limitation="As leituras climáticas são agregadas por canal. Não há vínculo entre sensor e variedade no cadastro atual.",
-        )
+        comparison = self._build_comparison(climate, plantations)
         return AnalystDashboard(summary=summary, quality=quality, comparison=comparison,
                                 generated_at=datetime.now(UTC))
 
-    async def quality_summary(self, start: datetime, end: datetime) -> dict[str, Any]:
+    async def comparison_summary(self, authorization: str) -> ComparisonSummary:
+        summary = await self.dashboard_summary(authorization)
+        return self._build_comparison(summary.climate, summary.plantations)
+
+    async def quality_summary(self, start: datetime | None, end: datetime | None) -> QualitySummary:
+        start, end = resolve_window(start, end)
         _, readings = await self.climate_summary(start, end)
-        return summarize_quality(readings, expected_metrics=EXPECTED_METRICS)
+        return QualitySummary.model_validate(summarize_quality(readings, expected_metrics=EXPECTED_METRICS))
+
+    @staticmethod
+    def _build_comparison(climate: ClimateSummary, plantations: PlantationSummary) -> ComparisonSummary:
+        return ComparisonSummary(
+            available=climate.available or plantations.total_plantations > 0,
+            climate_metrics=climate.metrics,
+            plantations_by_variety=plantations.by_variety,
+            limitation=COMPARISON_LIMITATION,
+        )
 
     @staticmethod
     def _build_dashboard(climate: ClimateSummary, plantations: PlantationSummary) -> DashboardSummary:

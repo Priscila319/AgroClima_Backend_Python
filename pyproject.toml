@@ -1,0 +1,35 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W: estilo, F: erros reais, I: imports, B: bugs comuns, UP: sintaxe moderna.
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501", "E702"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Query/Depends/Header em defaults de parâmetro são o padrão do FastAPI, não um bug.
+extend-immutable-calls = ["fastapi.Query", "fastapi.Depends", "fastapi.Header"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["pandas.*", "numpy.*", "swagger_ui_bundle.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
