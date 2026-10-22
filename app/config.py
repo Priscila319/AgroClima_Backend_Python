@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     profile_cache_ttl_seconds: float = 45.0
     # Limite de pontos da série bruta em /climate/history; acima disso exige resolution=hour|day.
     history_max_raw_points: int = 5000
+    # Fuso local do vinhedo (horas em relação ao UTC) para fechar os dias nos indicadores. Pernambuco: -3.
+    climate_utc_offset_hours: float = -3.0
     root_path: str = ""
 
     @field_validator("java_api_url")
@@ -87,6 +89,13 @@ class Settings(BaseSettings):
     def validate_max_raw_points(cls, value: int) -> int:
         if value < 100:
             raise ValueError("HISTORY_MAX_RAW_POINTS deve ser pelo menos 100.")
+        return value
+
+    @field_validator("climate_utc_offset_hours")
+    @classmethod
+    def validate_utc_offset(cls, value: float) -> float:
+        if value < -12 or value > 14:
+            raise ValueError("CLIMATE_UTC_OFFSET_HOURS deve estar entre -12 e 14.")
         return value
 
     @model_validator(mode="after")

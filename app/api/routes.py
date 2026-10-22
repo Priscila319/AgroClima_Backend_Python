@@ -11,10 +11,12 @@ from app.cache import TTLCache, token_key
 from app.clients.java_api import JavaApiClient
 from app.errors import ServiceError
 from app.models import (
+    AlertsSummary,
     AnalystDashboard,
     ClimateSummary,
     ComparisonSummary,
     DashboardSummary,
+    ExportIndicators,
     ForecastSummary,
     IntegrationStatus,
     MarketSummary,
@@ -23,6 +25,7 @@ from app.models import (
     UserProfile,
 )
 from app.services.dashboard import DashboardService
+from app.services.indicators import DEFAULT_BASE_TEMP, DEFAULT_TARGET_GDD, DEFAULT_UPPER_TEMP
 
 logger = logging.getLogger("agroclima.api")
 router = APIRouter(prefix="/api/v1", tags=["Análises e dashboards"])
@@ -154,8 +157,37 @@ async def market_dashboard(_: Annotated[RequestContext, Depends(current_context)
 
 
 @router.get("/dashboard/forecast", response_model=ForecastSummary)
-async def forecast_dashboard(_: Annotated[RequestContext, Depends(current_context)]) -> ForecastSummary:
-    return ForecastSummary()
+async def forecast_dashboard(
+    _: Annotated[RequestContext, Depends(current_context)], request: Request,
+) -> ForecastSummary:
+    """Projeção estatística simples de temperatura e umidade para os próximos 3 dias."""
+    return await _service(request).forecast()
+
+
+@router.get("/dashboard/alerts", response_model=AlertsSummary)
+async def alerts_dashboard(
+    _: Annotated[RequestContext, Depends(current_context)],
+    request: Request,
+    days: int = Query(default=7, ge=1, le=60, description="Quantos dias locais recentes avaliar."),
+    window: int = Query(default=7, ge=2, le=30, description="Tamanho da média móvel, em dias."),
+    z_threshold: float = Query(default=2.0, ge=1.0, le=5.0, description="Limite de z-score para anomalias."),
+) -> AlertsSummary:
+    """Médias móveis, anomalias, geada e estresse hídrico (aproximado por DPV)."""
+    return await _service(request).alerts(days, window, z_threshold)
+
+
+@router.get("/indicators/export", response_model=ExportIndicators)
+async def export_indicators(
+    _: Annotated[RequestContext, Depends(current_context)],
+    request: Request,
+    start: datetime | None = Query(default=None, description="Início (ex.: data da poda), ISO 8601 com fuso."),
+    end: datetime | None = Query(default=None, description="Fim, ISO 8601 com fuso. Sem datas: últimos 30 dias."),
+    base_temp: float = Query(default=DEFAULT_BASE_TEMP, ge=0, le=20, description="Temperatura-base, em °C."),
+    upper_temp: float = Query(default=DEFAULT_UPPER_TEMP, ge=20, le=50, description="Limite superior, em °C."),
+    target_gdd: float = Query(default=DEFAULT_TARGET_GDD, gt=0, le=5000, description="Alvo de graus-dia."),
+) -> ExportIndicators:
+    """Graus-dia acumulados, risco de míldio/oídio e janela estimada de colheita."""
+    return await _service(request).export_indicators(start, end, base_temp, upper_temp, target_gdd)
 
 
 @router.get("/integrations/thingspeak/status", response_model=IntegrationStatus)

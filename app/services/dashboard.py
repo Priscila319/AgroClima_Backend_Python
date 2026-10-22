@@ -10,10 +10,13 @@ from app.clients.java_api import JavaApiClient
 from app.config import Settings
 from app.errors import ServiceError
 from app.models import (
+    AlertsSummary,
     AnalystDashboard,
     ClimateSummary,
     ComparisonSummary,
     DashboardSummary,
+    ExportIndicators,
+    ForecastSummary,
     IntegrationStatus,
     PlantationByVariety,
     PlantationStatus,
@@ -22,10 +25,15 @@ from app.models import (
     SourceAvailability,
     SyncSummary,
 )
+from app.services.alerts import ANOMALY_BASELINE_DAYS, FORECAST_LOOKBACK_DAYS, build_alerts, build_forecast
 from app.services.analysis import summarize_climate, summarize_quality
+from app.services.daily import build_days, local_midnight_utc, local_zone
+from app.services.indicators import build_export_indicators
 
 HistoryResolution = Literal["auto", "raw", "hour", "day"]
 EXPECTED_METRICS = {"temperature", "humidity"}
+# A API Java devolve no máximo 5000 leituras por consulta (as mais antigas do período).
+JAVA_READINGS_LIMIT = 5000
 COMPARISON_LIMITATION = (
     "As leituras climáticas são agregadas por canal. Não há vínculo entre sensor e variedade no cadastro "
     "atual; não são inferidos rendimentos por uva."
@@ -194,6 +202,60 @@ class DashboardService:
         start, end = resolve_window(start, end)
         _, readings = await self.climate_summary(start, end)
         return QualitySummary.model_validate(summarize_quality(readings, expected_metrics=EXPECTED_METRICS))
+
+    async def export_indicators(self, start: datetime | None, end: datetime | None, base_temp: float,
+                                upper_temp: float, target_gdd: float) -> ExportIndicators:
+        """Graus-dia, risco de míldio/oídio e janela de colheita. Sem datas, usa os últimos 30 dias locais."""
+        if start is None and end is None:
+            end = datetime.now(UTC)
+            start = local_midnight_utc(end, 29, self.settings.climate_utc_offset_hours)
+        elif start is None or end is None:
+            raise ServiceError(400, "Informe as duas datas: start e end.")
+        if upper_temp <= base_temp:
+            raise ServiceError(400, "upper_temp deve ser maior que base_temp.")
+        self._validate_range(start, end)
+        readings = await self._readings_without_truncation(start, end)
+        days, rejected = build_days(readings, self.settings.climate_utc_offset_hours)
+        return build_export_indicators(days, rejected=rejected, base_temp=base_temp, upper_temp=upper_temp,
+                                       target_gdd=target_gdd)
+
+    async def alerts(self, days: int, average_window: int, z_threshold: float) -> AlertsSummary:
+        """Alertas dos últimos `days` dias locais. Busca dias extras antes do período como base das anomalias."""
+        offset = self.settings.climate_utc_offset_hours
+        end = datetime.now(UTC)
+        first_day = (end.astimezone(local_zone(offset)) - timedelta(days=days - 1)).date()
+        start = local_midnight_utc(end, days - 1 + ANOMALY_BASELINE_DAYS, offset)
+        readings = await self._readings_without_truncation(start, end)
+        series, _ = build_days(readings, offset)
+        return build_alerts(series, window_days=days, average_window=average_window, z_threshold=z_threshold,
+                            first_day=first_day)
+
+    async def forecast(self) -> ForecastSummary:
+        """Projeção de temperatura e umidade para os próximos dias, a partir dos últimos dias completos."""
+        end = datetime.now(UTC)
+        start = local_midnight_utc(end, FORECAST_LOOKBACK_DAYS, self.settings.climate_utc_offset_hours)
+        readings = await self._readings_without_truncation(start, end)
+        days, _ = build_days(readings, self.settings.climate_utc_offset_hours)
+        return build_forecast(days)
+
+    async def _readings_without_truncation(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        """Lê o período inteiro mesmo quando o Java corta em 5000 leituras: divide o intervalo ao meio e junta.
+
+        Só divide quando a resposta atinge o limite; períodos curtos continuam em uma única chamada.
+        """
+        readings = await self.java.climate_readings(start, end)
+        if len(readings) < JAVA_READINGS_LIMIT or end - start <= timedelta(hours=1):
+            return readings
+        middle = start + (end - start) / 2
+        middle = middle.replace(microsecond=0)
+        first, second = await asyncio.gather(
+            self._readings_without_truncation(start, middle),
+            self._readings_without_truncation(middle, end),
+        )
+        unique: dict[Any, dict[str, Any]] = {}
+        for reading in (*first, *second):  # o Java inclui as duas pontas: a leitura do meio pode vir duas vezes
+            unique.setdefault((reading.get("channelId"), reading.get("entryId"), reading.get("capturedAt")), reading)
+        return list(unique.values())
 
     @staticmethod
     def _build_comparison(climate: ClimateSummary, plantations: PlantationSummary) -> ComparisonSummary:
