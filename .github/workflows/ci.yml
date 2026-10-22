@@ -34,3 +34,21 @@ jobs:
         run: python -m pytest -q
         env:
           PYTHONPATH: ${{ github.workspace }}
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build da imagem
+        run: docker build -t agroclima-python .
+
+      - name: Subir o container e checar /health
+        run: |
+          docker run -d --name agroclima -p 8000:8000 agroclima-python
+          for i in $(seq 1 15); do
+            curl -fs http://localhost:8000/health && exit 0
+            sleep 2
+          done
+          docker logs agroclima
+          exit 1

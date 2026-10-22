@@ -14,3 +14,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Ambiente
+.env.*
+!.env.example
+
+# Editores e sistema
+.idea/
+.vscode/
+.DS_Store
