@@ -1,7 +1,7 @@
 from app.services.analysis import summarize_climate, summarize_quality
 
 
-def test_climate_summary_uses_pandas_numpy_for_current_average_min_max_and_series():
+def test_climate_summary_calculates_current_average_min_max_and_series():
     result = summarize_climate([
         {
             "capturedAt": "2026-10-07T10:00:00Z",

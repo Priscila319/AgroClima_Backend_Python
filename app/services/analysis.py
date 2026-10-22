@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import math
+from statistics import fmean
 from typing import Any, Literal
-
-import numpy as np
-import pandas as pd
 
 from app.models import ClimatePoint, ClimateSummary, MetricSummary
 
@@ -89,7 +88,6 @@ def aggregate_series(normalized: list[tuple[datetime, dict[str, float | None], s
 def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None = None,
                       rejected_records: int = 0, source: str = "ThingSpeak",
                       resolution: Literal["raw", "hour", "day"] = "raw") -> ClimateSummary:
-    rows: list[dict[str, Any]] = []
     measurement_keys: set[str] = set()
     normalized: list[tuple[datetime, dict[str, float | None], str]] = []
     for reading in readings:
@@ -105,7 +103,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
                 continue  # medições antigas de outros campos não entram no resumo
             try:
                 number = float(raw_value)
-                if not np.isfinite(number):
+                if not math.isfinite(number):
                     continue
             except (TypeError, ValueError, OverflowError):
                 continue
@@ -113,9 +111,6 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
             measurement_keys.add(str(name))
         quality = str(reading.get("qualityStatus", reading.get("quality_status", "VALID"))).upper()
         normalized.append((stamp, values, quality))
-        row: dict[str, Any] = {"timestamp": stamp}
-        row.update(values)
-        rows.append(row)
 
     normalized.sort(key=lambda item: item[0])
     if not normalized:
@@ -123,25 +118,19 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
                               resolution=resolution, rejected_records=rejected_records,
                               message="Ainda não há leituras climáticas disponíveis.")
 
-    frame = pd.DataFrame(rows).sort_values("timestamp", kind="stable")
     metrics: dict[str, MetricSummary] = {}
     for name in sorted(measurement_keys):
-        if name not in frame:
+        present = [value for _, values, _ in normalized if (value := values.get(name)) is not None]
+        if not present:
             continue
-        series = pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float, na_value=np.nan)
-        present = series[np.isfinite(series)]
-        if present.size == 0:
-            continue
-        latest_value = float(present[-1])
         metrics[name] = MetricSummary(
-            current=latest_value,
-            average=float(np.nanmean(present)),
-            minimum=float(np.nanmin(present)),
-            maximum=float(np.nanmax(present)),
+            current=present[-1],
+            average=fmean(present),
+            minimum=min(present),
+            maximum=max(present),
             unit=UNITS.get(_metric_key(name), ""),
-            samples=int(present.size),
+            samples=len(present),
         )
-
     normalized = [(stamp, values, quality if quality in {"VALID", "REVIEW", "REJECTED"} else "REVIEW")
                   for stamp, values, quality in normalized]
     if resolution == "raw":

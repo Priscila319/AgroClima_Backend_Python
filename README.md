@@ -205,7 +205,7 @@ app/
   api/routes.py        # rotas (finas: só chamam o service)
   services/
     dashboard.py       # regras dos dashboards
-    analysis.py        # cálculos (pandas/numpy)
+    analysis.py        # cálculos (Python puro)
     daily.py           # leituras -> dias locais (média horária, Tmin/Tmax)
     indicators.py      # graus-dia, risco de doença, janela de colheita
     alerts.py          # médias móveis, anomalias, geada, estresse hídrico, previsão
