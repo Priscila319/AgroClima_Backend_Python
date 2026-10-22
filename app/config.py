@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     history_max_raw_points: int = 5000
     # Fuso local do vinhedo (horas em relação ao UTC) para fechar os dias nos indicadores. Pernambuco: -3.
     climate_utc_offset_hours: float = -3.0
+    # Nome da fonte exibido nas respostas; a coleta em si é feita pela API Java.
+    climate_source_name: str = "ThingSpeak"
     root_path: str = ""
 
     @field_validator("java_api_url")

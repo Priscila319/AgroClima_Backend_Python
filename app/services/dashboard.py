@@ -123,11 +123,11 @@ class DashboardService:
             )
         return self._summarize(readings, chosen)
 
-    @staticmethod
-    def _summarize(readings: list[dict[str, Any]], resolution: Literal["raw", "hour", "day"]) -> ClimateSummary:
+    def _summarize(self, readings: list[dict[str, Any]], resolution: Literal["raw", "hour", "day"]) -> ClimateSummary:
         channel_ids = {str(reading.get("channelId")) for reading in readings if reading.get("channelId")}
         channel_id = channel_ids.pop() if len(channel_ids) == 1 else None
-        return summarize_climate(readings, channel_id=channel_id, source="ThingSpeak", resolution=resolution)
+        return summarize_climate(readings, channel_id=channel_id, source=self.settings.climate_source_name,
+                                 resolution=resolution)
 
     async def plantation_summary(self, authorization: str) -> tuple[PlantationSummary, list[dict[str, Any]]]:
         plantations = await self.java.plantations(authorization)
@@ -266,10 +266,10 @@ class DashboardService:
             limitation=COMPARISON_LIMITATION,
         )
 
-    @staticmethod
-    def _build_dashboard(climate: ClimateSummary, plantations: PlantationSummary) -> DashboardSummary:
+    def _build_dashboard(self, climate: ClimateSummary, plantations: PlantationSummary) -> DashboardSummary:
         sources = [
-            SourceAvailability(source="ThingSpeak", available=climate.available, configured=climate.available,
+            SourceAvailability(source=climate.source, available=climate.available,
+                               configured=self.settings.internal_key_configured,
                                message=climate.message or "Leituras de temperatura e umidade recebidas pela API Java."),
             SourceAvailability(source="API Java", available=True, configured=True,
                                message="Autenticação, plantações e persistência servidas pela API Java."),
