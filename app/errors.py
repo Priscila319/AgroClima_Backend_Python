@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.logging_config import REQUEST_ID_HEADER, request_id_var
@@ -25,7 +25,6 @@ class ServiceError(Exception):
 
 
 class ApiError(BaseModel):
-    model_config = ConfigDict(alias_generator=lambda value: value, populate_by_name=True)
     timestamp: datetime
     status: int
     error: str

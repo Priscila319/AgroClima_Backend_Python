@@ -78,10 +78,10 @@ def build_days(readings: list[dict[str, Any]], utc_offset_hours: float) -> tuple
     rows: list[dict[str, Any]] = []
     rejected = 0
     for reading in readings:
-        stamp = _timestamp(reading.get("capturedAt", reading.get("captured_at")))
+        stamp = _timestamp(reading.get("capturedAt"))
         if stamp is None:
             continue
-        quality = str(reading.get("qualityStatus", reading.get("quality_status", "VALID"))).upper()
+        quality = str(reading.get("qualityStatus", "VALID")).upper()
         if quality == "REJECTED":
             rejected += 1
             continue

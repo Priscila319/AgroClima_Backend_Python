@@ -91,7 +91,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
     measurement_keys: set[str] = set()
     normalized: list[tuple[datetime, dict[str, float | None], str]] = []
     for reading in readings:
-        stamp = _timestamp(reading.get("capturedAt", reading.get("captured_at")))
+        stamp = _timestamp(reading.get("capturedAt"))
         if stamp is None:
             continue
         measurements = reading.get("measurements")
@@ -109,7 +109,7 @@ def summarize_climate(readings: list[dict[str, Any]], *, channel_id: str | None 
                 continue
             values[str(name)] = number
             measurement_keys.add(str(name))
-        quality = str(reading.get("qualityStatus", reading.get("quality_status", "VALID"))).upper()
+        quality = str(reading.get("qualityStatus", "VALID")).upper()
         normalized.append((stamp, values, quality))
 
     normalized.sort(key=lambda item: item[0])
@@ -158,7 +158,7 @@ def summarize_quality(readings: list[dict[str, Any]], *, expected_metrics: set[s
     valid = review = rejected = 0
     measured_cells = expected_cells = 0
     for reading in readings:
-        status = str(reading.get("qualityStatus", reading.get("quality_status", "VALID"))).upper()
+        status = str(reading.get("qualityStatus", "VALID")).upper()
         if status == "VALID":
             valid += 1
         elif status == "REVIEW":

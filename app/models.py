@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date as DateValue
 from datetime import datetime
-from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -34,15 +33,6 @@ class UserProfile(ApiModel):
     role_key: str
     role: str
     status: str
-
-
-class NormalizedReading(ApiModel):
-    channel_id: str
-    entry_id: int
-    sensor_code: str
-    captured_at: datetime
-    measurements: dict[str, Decimal]
-    quality_status: Literal["VALID", "REVIEW", "REJECTED"] = "VALID"
 
 
 class MetricSummary(ApiModel):
