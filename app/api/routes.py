@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from app.services.export_market import obter_valor_exportacao_uva
-from app.services.grape_market import listar_precos_uva, listar_valor_producao_uva
-
 from dataclasses import dataclass
 from datetime import datetime
 import logging
@@ -32,6 +29,8 @@ from app.models import (
     UserProfile,
 )
 from app.services.dashboard import DashboardService
+from app.services.export_market import obter_valor_exportacao_uva
+from app.services.grape_market import listar_precos_uva, listar_valor_producao_uva
 from app.services.indicators import DEFAULT_BASE_TEMP, DEFAULT_TARGET_GDD, DEFAULT_UPPER_TEMP
 from app.services.models import ModelService
 
