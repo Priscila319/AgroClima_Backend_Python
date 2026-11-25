@@ -1,0 +1,28 @@
+# Ambiente virtual
+.venv/
+env/
+venv/
+
+# Variáveis de ambiente secretas
+.env
+
+# Ficheiros compilados do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Modelos treinados (persistidos em volume; não versionar artefatos)
+models_store/
+
+# Ambiente
+.env.*
+!.env.example
+
+# Editores e sistema
+.idea/
+.vscode/
+.DS_Store
