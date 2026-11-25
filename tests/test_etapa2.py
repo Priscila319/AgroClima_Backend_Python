@@ -10,6 +10,7 @@ import logging
 from fastapi.testclient import TestClient
 import httpx
 import pytest
+from rbac_catalog import permissions_for
 
 from app.clients.java_api import JavaApiClient
 from app.config import Settings
@@ -33,7 +34,8 @@ def _java(role: str = "ADMIN", ready_status: int = 200):
         if path == "/api/auth/me":
             return httpx.Response(200, json={
                 "id": "11111111-1111-4111-8111-111111111111", "name": "U", "email": "u@a.test",
-                "roleKey": role, "role": role, "status": "ACTIVE"})
+                "roleKey": role, "role": role, "status": "ACTIVE",
+                "permissionKeys": permissions_for(role)})
         if path == "/api/plantations":
             return httpx.Response(200, json=[{"variety": "Syrah", "quantity": 10, "status": "Ativa"}])
         if path == "/api/internal/climate-readings":
@@ -83,14 +85,20 @@ def test_every_route_declares_a_response_model_in_openapi():
     assert schema["paths"]["/api/v1/dashboard/producer"]["get"]["deprecated"] is True
 
 
-def test_producer_alias_returns_same_payload_as_summary_and_keeps_role_check():
+def test_producer_alias_returns_same_payload_as_summary_and_is_guarded_by_permission_only():
     with _client(_java("ADMIN")) as admin:
         summary = admin.get("/api/v1/dashboard/summary", headers=AUTH)
         producer = admin.get("/api/v1/dashboard/producer", headers=AUTH)
     assert summary.status_code == producer.status_code == 200
     assert summary.json()["plantations"] == producer.json()["plantations"]
+    # O papel não decide: ANALYST tem overview.view, então acessa o alias com o mesmo payload.
     with _client(_java("ANALYST")) as analyst:
-        assert analyst.get("/api/v1/dashboard/producer", headers=AUTH).status_code == 403
+        analyst_producer = analyst.get("/api/v1/dashboard/producer", headers=AUTH)
+    assert analyst_producer.status_code == 200
+    assert analyst_producer.json()["plantations"] == summary.json()["plantations"]
+    # Sem overview.view (papel sem permissões no catálogo) continua 403.
+    with _client(_java("SEM_PERMISSOES")) as nobody:
+        assert nobody.get("/api/v1/dashboard/producer", headers=AUTH).status_code == 403
 
 
 def test_comparison_and_integration_status_use_service_and_keep_extra_java_fields():

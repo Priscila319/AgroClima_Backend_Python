@@ -33,6 +33,9 @@ class UserProfile(ApiModel):
     role_key: str
     role: str
     status: str
+    # Permissões efetivas do catálogo RBAC da API Java (union das permissões dos papéis).
+    # Ausentes em respostas antigas do Java → conjunto vazio → acesso negado por padrão.
+    permission_keys: frozenset[str] = frozenset()
 
 
 class MetricSummary(ApiModel):
@@ -127,11 +130,119 @@ class MarketSummary(ApiModel):
     series: list[dict[str, float | str]] = Field(default_factory=list)
 
 
+class ForecastMetrics(ApiModel):
+    """Métricas de backtesting (validação walk-forward) de um modelo preditivo."""
+
+    mae: float | None = None
+    rmse: float | None = None
+    r2: float | None = None
+    samples: int = 0
+
+
 class ForecastSummary(ApiModel):
     available: bool = False
     model: str | None = None
     message: str = "Nenhum modelo preditivo foi configurado para produção."
     predictions: list[dict[str, float | str]] = Field(default_factory=list)
+    # Campos opcionais adicionados na etapa de modelos preditivos (mantêm compatibilidade com respostas antigas).
+    model_id: str | None = None
+    model_kind: Literal["statistical", "ml"] | None = None
+    trained_at: datetime | None = None
+    horizon_days: int | None = None
+    metrics: dict[str, ForecastMetrics] = Field(default_factory=dict)
+    backtest_days: int | None = None
+    confidence_level: float | None = None
+
+
+class ModelAlgorithmMetric(ApiModel):
+    """Desempenho de um algoritmo candidato no backtesting walk-forward."""
+
+    algorithm: str
+    metrics: dict[str, ForecastMetrics] = Field(default_factory=dict)
+    selected: bool = False
+
+
+class TrainedModelInfo(ApiModel):
+    """Metadados persistidos de um modelo de machine learning treinado."""
+
+    model_id: str
+    algorithm: str
+    trained_at: datetime
+    history_start: DateValue | None = None
+    history_end: DateValue | None = None
+    training_days: int = 0
+    horizon_days: int = 3
+    targets: list[str] = Field(default_factory=list)
+    metrics: dict[str, ForecastMetrics] = Field(default_factory=dict)
+    candidates: list[ModelAlgorithmMetric] = Field(default_factory=list)
+    feature_count: int = 0
+    active: bool = True
+
+
+class ModelStatus(ApiModel):
+    """Estado do registro de modelos: estatístico sempre disponível; ML só com histórico suficiente."""
+
+    statistical_available: bool = False
+    statistical_message: str | None = None
+    ml_enabled: bool = False
+    ml_min_train_days: int = 60
+    complete_days: int = 0
+    active_model: TrainedModelInfo | None = None
+    storage_dir: str | None = None
+    message: str | None = None
+
+
+class TrainRequest(ApiModel):
+    algorithm: Literal["auto", "random_forest", "gradient_boosting"] = "auto"
+    horizon_days: int = Field(default=3, ge=1, le=7)
+
+
+class TrainResult(ApiModel):
+    model: TrainedModelInfo
+    message: str
+
+
+class IrrigationEstimate(ApiModel):
+    """Necessidade hídrica por evapotranspiração (Hargreaves ET0 × Kc). Sem sensor de chuva/solo."""
+
+    et0_mm_day: float | None = None
+    etc_mm_day: float | None = None
+    crop_coefficient: float
+    vpd_kpa: float | None = None
+    recent_days: int = 0
+    message: str
+
+
+class PlantationAgronomy(ApiModel):
+    """Indicadores agronômicos de uma plantação real, calculados do histórico climático da estação."""
+
+    plantation_id: UUID
+    variety: str
+    field: str | None = None
+    status: PlantationStatus
+    planted_at: DateValue | None = None
+    days_since_planting: int | None = None
+    target_gdd: float
+    accumulated_gdd: float = 0.0
+    gdd_progress_percent: float | None = None
+    harvest: HarvestWindow | None = None
+    downy_mildew_risk: RiskLevel = "INSUFFICIENT_DATA"
+    powdery_mildew_risk: RiskLevel = "INSUFFICIENT_DATA"
+    recent_high_risk_days: int = 0
+    irrigation: IrrigationEstimate | None = None
+    complete_days: int = 0
+    message: str | None = None
+
+
+class AgronomySummary(ApiModel):
+    available: bool = False
+    base_temp: float
+    upper_temp: float
+    latitude: float
+    crop_coefficient: float
+    plantations: list[PlantationAgronomy] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    message: str | None = None
 
 
 class SyncSummary(ApiModel):

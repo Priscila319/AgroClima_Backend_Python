@@ -14,6 +14,7 @@ import re
 from fastapi.testclient import TestClient
 import httpx
 import pytest
+from rbac_catalog import permissions_for
 
 from app.config import Settings
 from app.main import create_app
@@ -46,6 +47,7 @@ class FakeJava:
             return httpx.Response(200, json={
                 "id": "11111111-1111-4111-8111-111111111111", "name": "Usuário", "email": "u@agro.test",
                 "roleKey": self.role_key, "role": self.role_key, "status": "ACTIVE",
+                "permissionKeys": permissions_for(self.role_key),
             })
 
         if request.url.path == "/api/integrations/thingspeak/sync" and request.method == "POST":

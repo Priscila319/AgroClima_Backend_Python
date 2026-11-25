@@ -8,6 +8,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 import httpx
 import pytest
+from rbac_catalog import permissions_for
 
 from app.config import Settings
 from app.main import create_app
@@ -222,6 +223,7 @@ class FakeJava:
             return httpx.Response(200, json={
                 "id": "11111111-1111-4111-8111-111111111111", "name": "U", "email": "u@agro.test",
                 "roleKey": "PRODUCER", "role": "PRODUCER", "status": "ACTIVE",
+                "permissionKeys": permissions_for("PRODUCER"),
             })
         if request.url.path == "/api/internal/climate-readings":
             return httpx.Response(200, json=self.rows)

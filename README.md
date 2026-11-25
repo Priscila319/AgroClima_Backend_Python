@@ -87,8 +87,13 @@ Todas as rotas `/api/v1/*` exigem `Authorization: Bearer <token>`. O token é va
 | GET | `/api/v1/dashboard/quality` | Analista/Admin |
 | GET | `/api/v1/dashboard/comparison` | Analista/Admin |
 | GET | `/api/v1/dashboard/market` | Qualquer usuário logado |
-| GET | `/api/v1/dashboard/forecast` | Qualquer usuário logado (projeção de 3 dias) |
+| GET | `/api/v1/dashboard/forecast` | Qualquer usuário logado (projeção: ML ativo, senão estatística) |
 | GET | `/api/v1/dashboard/alerts` | Qualquer usuário logado (`days`, `window`, `z_threshold`) |
+| GET | `/api/v1/models/status` | `analytics.view` (status do modelo ativo e do histórico) |
+| POST | `/api/v1/models/train` | `models.manage` (treina Random Forest / Gradient Boosting) |
+| GET | `/api/v1/models/forecast` | `analytics.view` (`horizon` 1 a 7 dias) |
+| DELETE | `/api/v1/models/active` | `models.manage` (remove o modelo ativo) |
+| GET | `/api/v1/agronomy/plantations` | `plantations.manage` ou `plantations.read.all` |
 | GET | `/api/v1/indicators/export` | Qualquer usuário logado (`start`, `end`, `base_temp`, `upper_temp`, `target_gdd`) |
 | GET | `/api/v1/integrations/thingspeak/status` | Admin |
 | POST | `/api/v1/integrations/thingspeak/sync` | Admin (`from` e `to` opcionais) |
@@ -134,7 +139,37 @@ Campos principais da resposta: `gddAccumulated`, `completeDays`, `incompleteDays
 
 A resposta também traz `series[]` com a média diária, a **média móvel** (`window` dias, 2 a 30) e o z-score de temperatura e umidade.
 
-`GET /api/v1/dashboard/forecast` devolve a **projeção dos próximos 3 dias** (temperatura e umidade) por regressão linear dos últimos 14 dias completos, com faixa `Low`/`High` de ± 1 desvio-padrão dos resíduos. Exige ao menos 7 dias completos; sem isso responde `available: false`.
+`GET /api/v1/dashboard/forecast` devolve a **projeção dos próximos dias** (temperatura e umidade). Se há um modelo de machine learning ativo, ele é usado; senão, a projeção estatística (Holt-Winters ou tendência linear). A resposta traz `modelKind` (`ml` ou `statistical`), `model`, `confidenceLevel`, `metrics` (MAE/RMSE/R² do backtest) e `predictions[]` com faixa `Low`/`High`. Exige ao menos 7 dias completos; sem isso responde `available: false`.
+
+## Modelos preditivos
+
+Três camadas, todas calculadas sobre o histórico real da estação (a API Java busca no ThingSpeak/MySQL). **Nenhuma é previsão meteorológica**: são projeções do histórico da estação, sem chuva, solo ou radiação medida.
+
+### Estatística (`services/forecasting.py`)
+
+Holt-Winters com tendência amortecida e sazonalidade semanal quando há ≥ 21 dias completos; abaixo disso, tendência linear. Intervalo de confiança de 95% a partir dos resíduos do *backtest* (6 origens móveis). Métricas MAE, RMSE e R² por alvo (temperatura e umidade). A umidade é limitada a 0–100%.
+
+### Machine learning (`services/ml.py`)
+
+`scikit-learn` (Random Forest e Gradient Boosting) com **20 features**: lags de temperatura/umidade (1, 2, 3, 7 dias), médias móveis, dia da semana, dia do ano e tendência. O treino compara os dois algoritmos por backtest e seleciona o melhor (ou o escolhido em `algorithm`). O modelo ativo é persistido em `MODEL_STORAGE_DIR` (`active.joblib` + `active.json` com metadados e métricas), com escrita atômica e `asyncio.Lock`.
+
+- `POST /api/v1/models/train` (`models.manage`): exige `MODEL_MIN_TRAIN_DAYS` dias completos (padrão 60); abaixo disso responde **409**. Corpo: `{ "algorithm": "auto|random_forest|gradient_boosting", "horizonDays": 1..7 }`.
+- `GET /api/v1/models/status` (`analytics.view`): dias completos, se o ML está habilitado, e o modelo ativo com métricas e candidatos.
+- `GET /api/v1/models/forecast` (`analytics.view`): projeção do modelo ativo (ou estatística), `horizon` 1 a 7.
+- `DELETE /api/v1/models/active` (`models.manage`): remove o modelo ativo; as projeções voltam à camada estatística.
+
+Treino e remoção geram **auditoria** no Java (`POST /api/audit-events`, best-effort: uma falha de auditoria não derruba a operação).
+
+### Agronômica (`services/agronomy.py`)
+
+`GET /api/v1/agronomy/plantations` cruza cada plantação real (da API Java) com o histórico climático:
+
+- **GDD** acumulado desde o plantio (base 10 °C, teto 35 °C) e progresso até `target_gdd` (padrão 1500).
+- **Janela de colheita** projetada pelo ritmo recente (P75/média/P25), com status `REACHED`/`PROJECTED`/`BEYOND_HORIZON`/`INSUFFICIENT_DATA`.
+- **Risco de míldio/oídio** pelas horas favoráveis recentes.
+- **Irrigação**: ET0 de Hargreaves (usa `VINEYARD_LATITUDE`), ETc = ET0·Kc (`CROP_COEFFICIENT`) e DPV.
+
+A resposta traz `assumptions[]` com as hipóteses usadas. Calibre `target_gdd` e Kc por variedade com um agrônomo.
 
 ### Limitações (leia antes de usar os números)
 
@@ -163,6 +198,11 @@ A resposta também traz `series[]` com a média diária, a **média móvel** (`w
 | `PROFILE_CACHE_TTL_SECONDS` | `45` | Cache do perfil do usuário (0 desliga; máx. 300) |
 | `HISTORY_MAX_RAW_POINTS` | `5000` | Limite de pontos brutos no histórico |
 | `CLIMATE_UTC_OFFSET_HOURS` | `-3` | Fuso local do vinhedo (-12 a 14), usado para fechar os dias nos indicadores |
+| `MODEL_STORAGE_DIR` | `models_store` | Diretório do modelo de ML ativo (joblib + metadados JSON) |
+| `MODEL_MIN_TRAIN_DAYS` | `60` | Mínimo de dias completos para treinar (30 a 365) |
+| `MODEL_MAX_TRAIN_DAYS` | `730` | Máximo de dias de histórico no treino (60 a 1500) |
+| `VINEYARD_LATITUDE` | `-9.4` | Latitude para o ET0 de Hargreaves (graus decimais) |
+| `CROP_COEFFICIENT` | `0.8` | Coeficiente de cultura Kc para ETc = ET0·Kc |
 
 > **Nunca suba o `.env` para o GitHub.** Ele já está no `.gitignore`. Use o `.env.example` como modelo.
 
@@ -209,7 +249,11 @@ app/
     daily.py           # leituras -> dias locais (média horária, Tmin/Tmax)
     indicators.py      # graus-dia, risco de doença, janela de colheita
     alerts.py          # médias móveis, anomalias, geada, estresse hídrico, previsão
-  clients/java_api.py  # único ponto de acesso à API Java (com retry)
+    forecasting.py     # Holt-Winters / tendência linear, backtest, intervalo de confiança
+    ml.py              # Random Forest / Gradient Boosting, features de lag, ModelRegistry
+    agronomy.py        # GDD por plantação, colheita, doença, irrigação (ET0/ETc/DPV)
+    models.py          # orquestra status/treino/projeção/remoção + auditoria
+  clients/java_api.py  # único ponto de acesso à API Java (com retry + auditoria)
 tests/                 # pytest
 pyproject.toml         # configuração de ruff, mypy e pytest
 .github/workflows/     # CI

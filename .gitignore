@@ -15,6 +15,9 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
+# Modelos treinados (persistidos em volume; não versionar artefatos)
+models_store/
+
 # Ambiente
 .env.*
 !.env.example

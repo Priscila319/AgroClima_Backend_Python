@@ -28,7 +28,7 @@ check_untyped_defs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["pandas.*", "numpy.*", "swagger_ui_bundle.*"]
+module = ["pandas.*", "numpy.*", "swagger_ui_bundle.*", "sklearn.*", "joblib.*", "scipy.*", "threadpoolctl.*", "statsmodels.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

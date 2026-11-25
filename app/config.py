@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     # Nome da fonte exibido nas respostas; a coleta em si é feita pela API Java.
     climate_source_name: str = "ThingSpeak"
     root_path: str = ""
+    # Modelos preditivos: diretório de persistência dos modelos treinados (joblib + metadados JSON).
+    model_storage_dir: str = "models_store"
+    # Mínimo de dias completos (temperatura + umidade) para habilitar o treinamento de machine learning.
+    model_min_train_days: int = 60
+    # Janela máxima de histórico usada no treinamento (dias).
+    model_max_train_days: int = 365
+    # Latitude do vinhedo (graus) para a radiação extraterrestre da equação de Hargreaves (ET0).
+    # Vale do São Francisco (Petrolina/Juazeiro): aproximadamente -9.4.
+    vineyard_latitude: float = -9.4
+    # Coeficiente de cultura (Kc) médio para uva de mesa; multiplica ET0 para estimar a necessidade hídrica.
+    crop_coefficient: float = 0.8
 
     @field_validator("java_api_url")
     @classmethod
@@ -99,6 +110,40 @@ class Settings(BaseSettings):
         if value < -12 or value > 14:
             raise ValueError("CLIMATE_UTC_OFFSET_HOURS deve estar entre -12 e 14.")
         return value
+
+    @field_validator("model_min_train_days")
+    @classmethod
+    def validate_min_train_days(cls, value: int) -> int:
+        if value < 30 or value > 365:
+            raise ValueError("MODEL_MIN_TRAIN_DAYS deve estar entre 30 e 365 dias.")
+        return value
+
+    @field_validator("model_max_train_days")
+    @classmethod
+    def validate_max_train_days(cls, value: int) -> int:
+        if value < 60 or value > 730:
+            raise ValueError("MODEL_MAX_TRAIN_DAYS deve estar entre 60 e 730 dias.")
+        return value
+
+    @field_validator("vineyard_latitude")
+    @classmethod
+    def validate_latitude(cls, value: float) -> float:
+        if value < -66 or value > 66:
+            raise ValueError("VINEYARD_LATITUDE deve estar entre -66 e 66 graus (faixa válida para Hargreaves).")
+        return value
+
+    @field_validator("crop_coefficient")
+    @classmethod
+    def validate_crop_coefficient(cls, value: float) -> float:
+        if value <= 0 or value > 1.5:
+            raise ValueError("CROP_COEFFICIENT deve estar entre 0 (exclusivo) e 1.5.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_model_days(self) -> Settings:
+        if self.model_max_train_days < self.model_min_train_days:
+            raise ValueError("MODEL_MAX_TRAIN_DAYS deve ser maior ou igual a MODEL_MIN_TRAIN_DAYS.")
+        return self
 
     @model_validator(mode="after")
     def validate_cors(self) -> Settings:

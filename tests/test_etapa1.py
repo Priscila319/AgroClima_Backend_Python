@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import httpx
 from pydantic import ValidationError
 import pytest
+from rbac_catalog import permissions_for
 
 from app.cache import TTLCache, token_key
 from app.config import Settings
@@ -38,7 +39,8 @@ class CountingJava:
         if path == "/api/auth/me":
             return httpx.Response(200, json={
                 "id": "11111111-1111-4111-8111-111111111111", "name": "U", "email": "u@a.test",
-                "roleKey": self.role_key, "role": self.role_key, "status": self.status})
+                "roleKey": self.role_key, "role": self.role_key, "status": self.status,
+                "permissionKeys": permissions_for(self.role_key)})
         if path == "/api/plantations":
             return httpx.Response(200, json=[{"variety": "Syrah", "quantity": 10, "status": "Ativa"}])
         if path == "/api/internal/climate-readings":

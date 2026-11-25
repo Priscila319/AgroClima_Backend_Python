@@ -27,7 +27,7 @@ from app.models import (
 )
 from app.services.alerts import ANOMALY_BASELINE_DAYS, FORECAST_LOOKBACK_DAYS, build_alerts, build_forecast
 from app.services.analysis import summarize_climate, summarize_quality
-from app.services.daily import build_days, local_midnight_utc, local_zone
+from app.services.daily import DayStats, build_days, local_midnight_utc, local_zone
 from app.services.indicators import build_export_indicators
 
 HistoryResolution = Literal["auto", "raw", "hour", "day"]
@@ -237,6 +237,17 @@ class DashboardService:
         readings = await self._readings_without_truncation(start, end)
         days, _ = build_days(readings, self.settings.climate_utc_offset_hours)
         return build_forecast(days)
+
+    async def load_days(self, days_back: int) -> tuple[list[DayStats], int]:
+        """Carrega `days_back` dias locais de histórico (sem truncar no limite de 5000 da API Java).
+
+        Reutilizado pelos modelos preditivos (treino/projeção) e pelos indicadores agronômicos.
+        Devolve a série diária ordenada e a contagem de leituras rejeitadas.
+        """
+        end = datetime.now(UTC)
+        start = local_midnight_utc(end, days_back, self.settings.climate_utc_offset_hours)
+        readings = await self._readings_without_truncation(start, end)
+        return build_days(readings, self.settings.climate_utc_offset_hours)
 
     async def _readings_without_truncation(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         """Lê o período inteiro mesmo quando o Java corta em 5000 leituras: divide o intervalo ao meio e junta.

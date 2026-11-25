@@ -29,6 +29,7 @@ from app.errors import (
 )
 from app.logging_config import REQUEST_ID_HEADER, RequestIdMiddleware, configure_logging
 from app.models import HealthResponse, ReadyResponse
+from app.services.ml import ModelRegistry
 
 configure_logging()
 logger = logging.getLogger("agroclima.api")
@@ -42,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = app_settings
         app.state.profile_cache = TTLCache(app_settings.profile_cache_ttl_seconds)
         app.state.http_client = httpx.AsyncClient(timeout=app_settings.request_timeout_seconds)
+        app.state.model_registry = ModelRegistry(app_settings.model_storage_dir)
         try:
             yield
         finally:
@@ -82,7 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=app_settings.configured_origins,
         allow_credentials=app_settings.cors_allow_credentials,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Accept", REQUEST_ID_HEADER],
         expose_headers=[REQUEST_ID_HEADER],
     )

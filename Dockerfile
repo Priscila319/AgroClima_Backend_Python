@@ -11,6 +11,8 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 RUN useradd --system --uid 10002 --create-home appuser
 COPY app ./app
+# Diretório de persistência dos modelos treinados (montado como volume no compose).
+RUN mkdir -p /app/models_store && chown -R appuser:appuser /app/models_store
 USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

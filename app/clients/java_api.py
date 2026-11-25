@@ -53,6 +53,17 @@ class JavaApiClient:
             raise ServiceError(502, "A API Java retornou uma resposta inválida para leituras climáticas.")
         return result
 
+    async def record_audit(self, authorization: str, action: str, resource: str,
+                           details: str | None = None) -> None:
+        """Registra um evento de auditoria na API Java em nome do usuário autenticado.
+
+        A API Java exige apenas isAuthenticated() e usa o JWT para identificar o autor; o Python
+        repassa o token do usuário, então o evento fica atribuído a quem executou a ação. Falha de
+        auditoria não deve desfazer uma operação já concluída (o chamador trata o erro como aviso).
+        """
+        await self._request("POST", "/api/audit-events", authorization=authorization,
+                            json={"action": action, "resource": resource, "details": details})
+
     async def thingspeak_status(self, authorization: str) -> dict[str, Any]:
         result = await self._request("GET", "/api/integrations/thingspeak/status", authorization=authorization)
         if not isinstance(result, dict):
