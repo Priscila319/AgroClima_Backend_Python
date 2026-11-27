@@ -41,7 +41,7 @@ HARGREAVES_COEFF = 0.0023
 
 AGRONOMY_ASSUMPTIONS = [
     "Graus-dia (GDD) acumulados desde a data de plantio, com base 10 °C e teto 35 °C, só em dias completos.",
-    "Plantios recém-cadastrados (< 3 dias completos pós-plantio) usam o ritmo recente da estação para projeção inicial.",
+    "Plantios recentes (< 3 dias completos) usam o ritmo atual da estação para projeção inicial.",
     "O alvo de GDD é um valor de referência para uva de mesa; calibre-o para a variedade e o ciclo do vinhedo.",
     "Colheita projetada pelo ritmo recente de GDD (cenários rápido / típico / lento), não por data fixa.",
     "Risco de míldio e oídio por horas de temperatura e umidade favoráveis; sem sensor de molhamento foliar ou chuva.",
@@ -101,8 +101,12 @@ def _irrigation(recent: list[DayStats], latitude: float, kc: float) -> Irrigatio
             crop_coefficient=kc, recent_days=0,
             message="Sem dias completos recentes para estimar a evapotranspiração.",
         )
-    et0_values = [hargreaves_et0(day.temperature_min, day.temperature_max, latitude, day.day.timetuple().tm_yday)  # type: ignore[arg-type]
-                  for day in usable]
+    et0_values = [
+        hargreaves_et0(
+            day.temperature_min, day.temperature_max, latitude, day.day.timetuple().tm_yday  # type: ignore[arg-type]
+        )
+        for day in usable
+    ]
     et0 = round(sum(et0_values) / len(et0_values), 2)
     vpd_values = [vapor_pressure_deficit(day.temperature_mean, day.humidity_mean)
                   for day in usable if day.temperature_mean is not None and day.humidity_mean is not None]
@@ -194,8 +198,16 @@ def build_plantation_agronomy(plantation: dict[str, Any], days: list[DayStats], 
     )
 
 
-def _harvest(last_day: date | None, accumulated: float, target: float, reached_on: date | None,
-             recent_rates: list[float], high_risk: int, *, used_station_baseline: bool = False) -> HarvestWindow | None:
+def _harvest(
+    last_day: date | None,
+    accumulated: float,
+    target: float,
+    reached_on: date | None,
+    recent_rates: list[float],
+    high_risk: int,
+    *,
+    used_station_baseline: bool = False,
+) -> HarvestWindow | None:
     if last_day is None:
         return None
     remaining = round(max(target - accumulated, 0.0), 2)
