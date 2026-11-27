@@ -4,10 +4,6 @@ Para cada plantação ativa, acumula graus-dia (GDD) desde o plantio, projeta a 
 pelo ritmo recente, estima risco de míldio/oídio e a necessidade hídrica por evapotranspiração
 (Hargreaves ET0 × Kc). Reaproveita os cálculos de ``indicators.py`` (GDD, doença, colheita) para
 não duplicar regra agronômica.
-
-Limitações honestas: só há temperatura e umidade (sem chuva, molhamento foliar nem umidade do
-solo). A ET0 de Hargreaves usa radiação extraterrestre pela latitude e o dia do ano; a necessidade
-hídrica é uma estimativa de demanda atmosférica, não uma lâmina de irrigação prescrita.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ from app.services.indicators import (
     DEFAULT_BASE_TEMP,
     DEFAULT_TARGET_GDD,
     DEFAULT_UPPER_TEMP,
+    MIN_RECENT_DAYS,
     RECENT_DAYS,
     daily_gdd,
     disease_hours,
@@ -44,6 +41,7 @@ HARGREAVES_COEFF = 0.0023
 
 AGRONOMY_ASSUMPTIONS = [
     "Graus-dia (GDD) acumulados desde a data de plantio, com base 10 °C e teto 35 °C, só em dias completos.",
+    "Plantios recém-cadastrados (< 3 dias completos pós-plantio) usam o ritmo recente da estação para projeção inicial.",
     "O alvo de GDD é um valor de referência para uva de mesa; calibre-o para a variedade e o ciclo do vinhedo.",
     "Colheita projetada pelo ritmo recente de GDD (cenários rápido / típico / lento), não por data fixa.",
     "Risco de míldio e oídio por horas de temperatura e umidade favoráveis; sem sensor de molhamento foliar ou chuva.",
@@ -143,21 +141,22 @@ def build_plantation_agronomy(plantation: dict[str, Any], days: list[DayStats], 
         scoped = [day for day in complete if day.day >= planted_at]
     else:
         scoped = complete
-    days_since = (scoped[-1].day - planted_at).days + 1 if (scoped and planted_at) else None
+    days_since = (scoped[-1].day - planted_at).days + 1 if (scoped and planted_at) else (0 if planted_at else None)
 
     accumulated = 0.0
     reached_on: date | None = None
-    rates: list[float] = []
     for day in scoped:
         if day.temperature_min is None or day.temperature_max is None:
             continue
         gdd = daily_gdd(day.temperature_min, day.temperature_max, base_temp, upper_temp)
         accumulated = round(accumulated + gdd, 2)
-        rates.append(gdd)
         if reached_on is None and accumulated >= target_gdd:
             reached_on = day.day
 
-    recent = scoped[-RECENT_DAYS:]
+    # Se a plantação tem menos de 3 dias pós-plantio, usa os últimos dias da estação como ritmo inicial!
+    used_station_baseline = len(scoped) < MIN_RECENT_DAYS and len(complete) >= MIN_RECENT_DAYS
+    recent = scoped[-RECENT_DAYS:] if len(scoped) >= MIN_RECENT_DAYS else complete[-RECENT_DAYS:]
+
     high_risk = 0
     downy_risk: RiskLevel = "INSUFFICIENT_DATA"
     powdery_risk: RiskLevel = "INSUFFICIENT_DATA"
@@ -172,15 +171,19 @@ def build_plantation_agronomy(plantation: dict[str, Any], days: list[DayStats], 
 
     recent_rates = [daily_gdd(d.temperature_min, d.temperature_max, base_temp, upper_temp)
                     for d in recent if d.temperature_min is not None and d.temperature_max is not None]
-    harvest = _harvest(scoped[-1].day if scoped else None, accumulated, target_gdd, reached_on, recent_rates, high_risk)
+    reference_day = scoped[-1].day if scoped else (planted_at or (complete[-1].day if complete else None))
+    harvest = _harvest(reference_day, accumulated, target_gdd, reached_on, recent_rates, high_risk,
+                       used_station_baseline=used_station_baseline)
     progress = round(min(accumulated / target_gdd * 100, 100.0), 1) if target_gdd > 0 else None
     message = None
     if status != PlantationStatus.GROWING:
         message = "Plantação colhida ou arquivada; indicadores apenas para consulta do ciclo encerrado."
     elif planted_at is None:
         message = "Sem data de plantio cadastrada; GDD acumulado sobre todo o histórico disponível."
+    elif used_station_baseline:
+        message = "Plantio recente: previsão calculada com base no ritmo térmico atual da estação climática."
     elif not scoped:
-        message = "Ainda não há dias completos de leitura após a data de plantio."
+        message = "Ainda não há dias completos de leitura para calcular a previsão."
 
     return PlantationAgronomy(
         plantation_id=plantation_id, variety=variety, field=field, status=status, planted_at=planted_at,
@@ -192,7 +195,7 @@ def build_plantation_agronomy(plantation: dict[str, Any], days: list[DayStats], 
 
 
 def _harvest(last_day: date | None, accumulated: float, target: float, reached_on: date | None,
-             recent_rates: list[float], high_risk: int) -> HarvestWindow | None:
+             recent_rates: list[float], high_risk: int, *, used_station_baseline: bool = False) -> HarvestWindow | None:
     if last_day is None:
         return None
     remaining = round(max(target - accumulated, 0.0), 2)
@@ -204,9 +207,13 @@ def _harvest(last_day: date | None, accumulated: float, target: float, reached_o
                              message="O alvo de graus-dia já foi atingido desde o plantio.", **common)
     projection = project_harvest(last_day, remaining, recent_rates)
     messages = {
-        "PROJECTED": "Colheita projetada pelo ritmo recente de graus-dia desde o plantio.",
+        "PROJECTED": (
+            "Projeção inicial pelo ritmo térmico recente da estação climática."
+            if used_station_baseline
+            else "Colheita projetada pelo ritmo recente de graus-dia desde o plantio."
+        ),
         "BEYOND_HORIZON": "O alvo não deve ser atingido no horizonte de projeção no ritmo atual.",
-        "INSUFFICIENT_DATA": "São necessários ao menos 3 dias completos recentes para projetar a colheita.",
+        "INSUFFICIENT_DATA": "São necessários ao menos 3 dias completos na estação para projetar a colheita.",
     }
     return HarvestWindow(status=projection.status, earliest=projection.earliest, expected=projection.expected,
                          latest=projection.latest, message=messages[projection.status], **common)
