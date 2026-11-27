@@ -11,6 +11,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 RUN useradd --system --uid 10002 --create-home appuser
 COPY app ./app
+COPY data ./data
 # Diretório de persistência dos modelos treinados (montado como volume no compose).
 RUN mkdir -p /app/models_store && chown -R appuser:appuser /app/models_store
 USER appuser
