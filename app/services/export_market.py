@@ -22,7 +22,10 @@ _HEADERS = {
 
 # Cache em memória por 1h (evita rate-limit 429/500 da API pública do MDIC).
 _CACHE: dict[tuple[int | None, int, int], tuple[float, dict[str, Any]]] = {}
-_CACHE_TTL_SECONDS = 3600.0
+_CACHE_TTL_SECONDS = 6 * 3600.0
+
+# Último resultado bom (sem expirar): usado se o MDIC estiver fora do ar.
+_ULTIMO_OK: dict[str, Any] | None = None
 
 
 async def _ultimo_periodo_publicado(client: httpx.AsyncClient) -> tuple[int, int] | None:
@@ -124,24 +127,40 @@ async def obter_valor_exportacao_uva(
         if ano_alvo > ult_ano:
             ano_alvo, fim_alvo = ult_ano, ult_mes
 
-        periodo_de = f"{ano_alvo}-{mes_inicio:02d}"
-        periodo_ate = f"{ano_alvo}-{max(mes_inicio, fim_alvo):02d}"
+        # Períodos candidatos, do mais atual ao mais seguro.
+        candidatos: list[tuple[str, str]] = [
+            (f"{ano_alvo}-{mes_inicio:02d}", f"{ano_alvo}-{max(mes_inicio, fim_alvo):02d}")
+        ]
+        if ano is None:
+            # Últimos 12 meses publicados
+            ini_ano, ini_mes = ult_ano, ult_mes - 11
+            if ini_mes <= 0:
+                ini_mes += 12
+                ini_ano -= 1
+            candidatos.append((f"{ini_ano}-{ini_mes:02d}", f"{ult_ano}-{ult_mes:02d}"))
+            # Último ano fechado
+            candidatos.append((f"{ult_ano - 1}-01", f"{ult_ano - 1}-12"))
 
-        registros = await _consultar_comexstat(client, periodo_de, periodo_ate)
-
-        # Se o ano corrente falhar na API do MDIC, tenta o último ano completo fechado como fallback real.
-        if registros is None and ano is None and ano_alvo == date.today().year:
-            ano_anterior = ano_alvo - 1
-            periodo_de = f"{ano_anterior}-01"
-            periodo_ate = f"{ano_anterior}-12"
+        registros: list[dict[str, Any]] | None = []
+        periodo_de, periodo_ate = candidatos[0]
+        falhou_rede = True
+        for periodo_de, periodo_ate in candidatos:
             registros = await _consultar_comexstat(client, periodo_de, periodo_ate)
+            if registros is not None:
+                falhou_rede = False
+            if registros:  # lista não vazia -> achou dados
+                break
 
+    global _ULTIMO_OK
     if not registros:
+        # MDIC fora do ar: devolve o último resultado bom, marcado como desatualizado.
+        if _ULTIMO_OK is not None:
+            return {**_ULTIMO_OK, "desatualizado": True}
         return {
             "disponivel": False,
             "mensagem": (
                 "A API pública do ComexStat (MDIC) está temporariamente indisponível no momento."
-                if registros is None
+                if falhou_rede
                 else "Nenhum dado de exportação encontrado para o período."
             ),
             "ncm": NCM_UVA_FRESCA,
@@ -171,4 +190,5 @@ async def obter_valor_exportacao_uva(
         "atualizado_em": date.today().isoformat(),
     }
     _CACHE[chave] = (agora, resultado)
+    _ULTIMO_OK = resultado
     return resultado
